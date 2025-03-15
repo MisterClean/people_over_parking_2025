@@ -263,6 +263,13 @@ This policy aims to prioritize transit-oriented development and potentially redu
 
 ## Resources and References
 
-- [People Over Parking Act (HB3256)](https://www.ilga.gov/legislation/billstatus.asp?DocNum=3256&GAID=16&GA=104&DocTypeID=HB&LegID=&SessionID=91)
+- [People Over Parking Act (HB3256)](https://www.ilga.gov/legislation/billstatus.asp?DocNum=3256&GAID=18&GA=104&DocTypeID=HB&LegID=161742&SessionID=114) [SB2352](https://ilga.gov/legislation/BillStatus.asp?DocNum=2352&GAID=18&DocTypeID=SB&LegId=162316&SessionID=114&GA=104)
 - [Chicago Transit Authority GTFS Data](https://www.transitchicago.com/downloads/sch_data/)
 - [General Transit Feed Specification Reference](https://developers.google.com/transit/gtfs/reference)
+- [Illinois Homes For All Coalition](https://ilhomesforall.org/)
+- [Abundant Housing Illinois](https://abundanthousingillinois.org/)
+- [Housing costs in Illinois are rising. Lawmakers are considering several bills that could help](https://abundanthousingillinois.org/op-eds/housing-costs-in-illinois-are-rising-lawmakers-are-considering-several-bills-that-could-help/)
+- [Hyde Park Herald "Buckner-sponsored bills aim to speed up housing development in Illinois cities"](https://www.hpherald.com/evening_digest/buckner-sponsored-bills-aim-to-speed-up-housing-development-in-illinois-cities/article_3e6d29a2-f623-11ef-9007-b74a49539892.html)
+- [Evanston Round Table "New zoning bills would enact some Envision Evanston proposals statewide"](https://evanstonroundtable.com/2025/02/03/new-bills-would-take-some-envision-zoning-proposals-statewide/)
+- [Illinois REALTORS unveils legislative agenda aimed at easing housing shortage](https://abundanthousingillinois.org/op-eds/illinois-realtors-unveils-legislative-agenda-aimed-at-easing-housing-shortage/)
+- [Parking Reform Network "What is parking reform?"](https://parkingreform.org/what-is-parking-reform/)
