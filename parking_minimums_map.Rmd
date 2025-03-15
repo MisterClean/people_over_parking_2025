@@ -205,7 +205,7 @@ map <- leaflet() %>%
   addLegend(
     position = "bottomright",
     colors = c("purple"),
-    labels = c("Areas Affected by HB3256"),
+    labels = c("CTA Transit-served Areas Affected by the People Over Parking Act"),
     opacity = 0.7
   ) %>%
   addFullscreenControl() %>%
