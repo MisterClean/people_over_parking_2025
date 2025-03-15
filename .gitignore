@@ -5,6 +5,7 @@ data/
 # Generated outputs
 *.html
 !index.html
+!docs/*.html
 people_over_parking_map.html
 people_over_parking_static_map.png
 *.Rproj.user/

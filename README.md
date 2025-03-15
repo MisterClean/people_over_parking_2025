@@ -30,6 +30,13 @@ This repository includes:
    - Sample output files
    - Visualizations for presentation
 
+## View the Analysis Online
+
+You can view the interactive analysis on GitHub Pages at:
+`https://[your-username].github.io/people_over_parking_2025/`
+
+(Replace `[your-username]` with your GitHub username after setting up GitHub Pages as described in the [docs/README.md](docs/README.md) file)
+
 ## Getting Started
 
 ### Prerequisites
