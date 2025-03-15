@@ -202,24 +202,10 @@ map <- leaflet() %>%
     opacity = 0.7,
     group = "Affected Areas (1/2 Mile from Hubs)"
   ) %>%
-  addCircleMarkers(
-    data = all_hubs_sf,
-    radius = 3,
-    color = ~pal(type),
-    stroke = FALSE,
-    fillOpacity = 0.8,
-    label = ~stop_name,
-    group = "Transit Hubs",
-    clusterOptions = markerClusterOptions()
-  ) %>%
-  addLayersControl(
-    overlayGroups = c("Affected Areas (1/2 Mile from Hubs)", "Transit Hubs"),
-    options = layersControlOptions(collapsed = FALSE)
-  ) %>%
   addLegend(
     position = "bottomright",
-    colors = c("blue", "green", "purple"),
-    labels = c("Rail Stations", "Major Bus Hubs", "Areas Affected by HB3256"),
+    colors = c("purple"),
+    labels = c("Areas Affected by HB3256"),
     opacity = 0.7
   ) %>%
   addFullscreenControl() %>%
