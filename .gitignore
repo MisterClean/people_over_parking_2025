@@ -1,0 +1,16 @@
+# Data files
+data/
+*.zip
+
+# Generated outputs
+*.html
+!index.html
+people_over_parking_map.html
+people_over_parking_static_map.png
+*.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Mac OS files
+.DS_Store
