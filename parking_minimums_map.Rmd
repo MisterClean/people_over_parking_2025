@@ -73,77 +73,246 @@ library(mapview)
 ```{r download_gtfs, results='hide'}
 ## Download and Process GTFS Data
 
-## We'll download the latest CTA GTFS data, extract it, and process it to identify public transportation hubs according to the bill's definition.
+## We'll download the latest GTFS data for all three transit agencies (CTA, Pace, and Metra),
+## extract them, and process them to identify public transportation hubs according to the bill's definition.
 
-# Fixed direct URL for the GTFS download
-zip_link <- "https://www.transitchicago.com/downloads/sch_data/google_transit.zip"
-
-# Create a temporary directory to store the downloaded file
-temp_dir <- tempdir()
-temp_file <- file.path(temp_dir, "cta_gtfs.zip")
-
-# Create a cache directory
-cache_dir <- "gtfs_cache"
-if (!dir.exists(cache_dir)) {
-  dir.create(cache_dir)
-}
-cache_file <- file.path(cache_dir, "cta_gtfs.zip")
-
-# Try to download or use cached data
-tryCatch({
-  # Download the GTFS ZIP file with a timeout
-  options(timeout = 60)  # Increase timeout to 60 seconds
-  download.file(zip_link, temp_file, mode = "wb", quiet = TRUE)
-  
-  # Save a copy to cache
-  file.copy(temp_file, cache_file, overwrite = TRUE)
-  
-}, error = function(e) {
-  message("Download failed: ", e$message)
-  if (file.exists(cache_file)) {
-    message("Using cached GTFS data from ", cache_file)
-    file.copy(cache_file, temp_file, overwrite = TRUE)
-  } else {
-    stop("Could not download GTFS data and no cache available.", call. = FALSE)
+# Function to download and extract GTFS data
+download_and_extract_gtfs <- function(agency_name, zip_link) {
+  # Create a temporary directory to store the downloaded file
+  temp_dir <- file.path(tempdir(), agency_name)
+  if (!dir.exists(temp_dir)) {
+    dir.create(temp_dir, recursive = TRUE)
   }
-})
+  
+  temp_file <- file.path(temp_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  # Create a cache directory
+  cache_dir <- "gtfs_cache"
+  if (!dir.exists(cache_dir)) {
+    dir.create(cache_dir)
+  }
+  cache_file <- file.path(cache_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  # Try to download or use cached data
+  tryCatch({
+    # Download the GTFS ZIP file with a timeout
+    options(timeout = 60)  # Increase timeout to 60 seconds
+    download.file(zip_link, temp_file, mode = "wb", quiet = TRUE)
+    
+    # Save a copy to cache
+    file.copy(temp_file, cache_file, overwrite = TRUE)
+    
+  }, error = function(e) {
+    message(paste0("Download failed for ", agency_name, ": ", e$message))
+    if (file.exists(cache_file)) {
+      message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+      file.copy(cache_file, temp_file, overwrite = TRUE)
+    } else {
+      stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
+    }
+  })
+  
+  # Extract the files
+  gtfs_files <- unzip(temp_file, exdir = temp_dir)
+  
+  # Return the directory containing the extracted files
+  return(temp_dir)
+}
 
-# Extract the files
-gtfs_files <- unzip(temp_file, exdir = temp_dir)
+# Download and extract GTFS data for all three agencies
+cta_dir <- download_and_extract_gtfs("cta", "https://www.transitchicago.com/downloads/sch_data/google_transit.zip")
+pace_dir <- download_and_extract_gtfs("pace", "https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip")
+metra_dir <- download_and_extract_gtfs("metra", "https://schedules.metrarail.com/gtfs/schedule.zip")
 ```
 ```{r process_stops}
 ## Identify Public Transportation Hubs
 
-## Now we'll process the GTFS data to identify the public transportation hubs as defined in the legislation.
+## Now we'll process the GTFS data from all three agencies to identify the public transportation hubs as defined in the legislation.
 
-# Read the stops data
-stops <- fread(file.path(temp_dir, "stops.txt"))
+# Function to read and normalize GTFS data
+read_normalize_gtfs <- function(agency_name, agency_dir) {
+  # Read the stops data
+  stops_file <- file.path(agency_dir, "stops.txt")
+  if (file.exists(stops_file)) {
+    stops <- fread(stops_file)
+    # Add agency identifier
+    stops[, agency := agency_name]
+    
+    # Normalize column names and types
+    if (!"location_type" %in% names(stops)) {
+      stops[, location_type := NA_integer_]
+    }
+    if (!"parent_station" %in% names(stops)) {
+      stops[, parent_station := NA_character_]
+    }
+    
+    # Ensure stop_id is character
+    stops[, stop_id := as.character(stop_id)]
+    
+    # Create a unique ID that includes the agency
+    stops[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+  } else {
+    stops <- data.table(
+      stop_id = character(),
+      stop_name = character(),
+      stop_lat = numeric(),
+      stop_lon = numeric(),
+      location_type = integer(),
+      parent_station = character(),
+      agency = character(),
+      unique_stop_id = character()
+    )
+  }
+  
+  # Read the routes data
+  routes_file <- file.path(agency_dir, "routes.txt")
+  if (file.exists(routes_file)) {
+    routes <- fread(routes_file)
+    # Add agency identifier
+    routes[, agency := agency_name]
+    
+    # Normalize route_id to character
+    routes[, route_id := as.character(route_id)]
+    
+    # Create a unique ID that includes the agency
+    routes[, unique_route_id := paste0(agency_name, "_", route_id)]
+  } else {
+    routes <- data.table(
+      route_id = character(),
+      route_type = integer(),
+      agency = character(),
+      unique_route_id = character()
+    )
+  }
+  
+  # Read trips data
+  trips_file <- file.path(agency_dir, "trips.txt")
+  if (file.exists(trips_file)) {
+    trips <- fread(trips_file)
+    # Add agency identifier
+    trips[, agency := agency_name]
+    
+    # Normalize trip_id and route_id to character
+    trips[, trip_id := as.character(trip_id)]
+    trips[, route_id := as.character(route_id)]
+    
+    # Create unique IDs that include the agency
+    trips[, unique_trip_id := paste0(agency_name, "_", trip_id)]
+    trips[, unique_route_id := paste0(agency_name, "_", route_id)]
+  } else {
+    trips <- data.table(
+      trip_id = character(),
+      route_id = character(),
+      service_id = character(),
+      agency = character(),
+      unique_trip_id = character(),
+      unique_route_id = character()
+    )
+  }
+  
+  # Read stop_times data
+  stop_times_file <- file.path(agency_dir, "stop_times.txt")
+  if (file.exists(stop_times_file)) {
+    stop_times <- fread(stop_times_file)
+    # Add agency identifier
+    stop_times[, agency := agency_name]
+    
+    # Normalize trip_id and stop_id to character
+    stop_times[, trip_id := as.character(trip_id)]
+    stop_times[, stop_id := as.character(stop_id)]
+    
+    # Create unique IDs that include the agency
+    stop_times[, unique_trip_id := paste0(agency_name, "_", trip_id)]
+    stop_times[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+  } else {
+    stop_times <- data.table(
+      trip_id = character(),
+      stop_id = character(),
+      arrival_time = character(),
+      departure_time = character(),
+      stop_sequence = integer(),
+      agency = character(),
+      unique_trip_id = character(),
+      unique_stop_id = character()
+    )
+  }
+  
+  # Read calendar data
+  calendar_file <- file.path(agency_dir, "calendar.txt")
+  if (file.exists(calendar_file)) {
+    calendar <- fread(calendar_file)
+    # Add agency identifier
+    calendar[, agency := agency_name]
+  } else {
+    calendar <- data.table(
+      service_id = character(),
+      monday = integer(),
+      tuesday = integer(),
+      wednesday = integer(),
+      thursday = integer(),
+      friday = integer(),
+      saturday = integer(),
+      sunday = integer(),
+      start_date = integer(),
+      end_date = integer(),
+      agency = character()
+    )
+  }
+  
+  # Return all normalized tables
+  return(list(
+    stops = stops,
+    routes = routes,
+    trips = trips,
+    stop_times = stop_times,
+    calendar = calendar
+  ))
+}
 
-# Read the routes data
-routes <- fread(file.path(temp_dir, "routes.txt"))
+# Read and normalize GTFS data for all three agencies
+cta_data <- read_normalize_gtfs("cta", cta_dir)
+pace_data <- read_normalize_gtfs("pace", pace_dir)
+metra_data <- read_normalize_gtfs("metra", metra_dir)
 
-# Read trips data
-trips <- fread(file.path(temp_dir, "trips.txt"))
+# Combine data from all agencies
+all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops), fill = TRUE)
+all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes), fill = TRUE)
+all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips), fill = TRUE)
+all_stop_times <- rbindlist(list(cta_data$stop_times, pace_data$stop_times, metra_data$stop_times), fill = TRUE)
+all_calendar <- rbindlist(list(cta_data$calendar, pace_data$calendar, metra_data$calendar), fill = TRUE)
 
-# Read stop_times data
-stop_times <- fread(file.path(temp_dir, "stop_times.txt"))
+# Identify rail transit stations across all agencies
+# CTA: route_type = 1 (subway/metro)
+# Metra: route_type = 2 (rail)
+# Pace: No rail routes
+rail_routes <- all_routes[route_type %in% c(1, 2)]
 
-# Read calendar data
-calendar <- fread(file.path(temp_dir, "calendar.txt"))
+# For CTA, use parent_station or location_type to identify stations
+cta_rail_stops <- all_stops[
+  agency == "cta" & 
+  ((!is.na(parent_station) & parent_station != "") | 
+   (!is.na(location_type) & location_type == 1))
+]
 
-# First, identify all rail transit stations
-rail_routes <- routes[route_type == 1]  # Type 1 is subway/metro/rail in GTFS
-rail_stops <- stops[parent_station != "" | (location_type == 1)]
+# For Metra, all stops are rail stations, but filter out Wisconsin stations
+# The Illinois-Wisconsin border is approximately at 42.5 degrees latitude
+metra_rail_stops <- all_stops[agency == "metra" & stop_lat <= 42.5]
+
+# Combine all rail stations
+rail_stops <- rbindlist(list(cta_rail_stops, metra_rail_stops), fill = TRUE)
 
 # Create a spatial object for rail stations
 rail_stations_sf <- st_as_sf(rail_stops, coords = c("stop_lon", "stop_lat"), crs = 4326)
 
-# Now we need to identify bus stops that meet the criteria of 2+ major routes with frequency ≤ 15 min
-# First we need to determine the service periods for weekdays (Monday-Friday)
-weekday_service <- calendar[monday == 1 & tuesday == 1 & wednesday == 1 & thursday == 1 & friday == 1, service_id]
+# Now identify bus stops that meet the criteria of 2+ major routes with frequency ≤ 15 min
+# First determine the service periods for weekdays (Monday-Friday)
+weekday_service <- all_calendar[
+  monday == 1 & tuesday == 1 & wednesday == 1 & thursday == 1 & friday == 1, 
+  .(service_id, agency)
+]
 
 # Get the trips that operate on weekdays
-weekday_trips <- trips[service_id %in% weekday_service]
+weekday_trips <- merge(all_trips, weekday_service, by = c("service_id", "agency"))
 
 # Define peak hours (e.g., 7-9 AM and 4-6 PM)
 morning_peak_start <- as.ITime("07:00:00")
@@ -151,32 +320,40 @@ morning_peak_end <- as.ITime("09:00:00")
 evening_peak_start <- as.ITime("16:00:00")
 evening_peak_end <- as.ITime("18:00:00")
 
-# Filter stop times for peak hours
-stop_times[, arrival_time_hhmmss := substr(arrival_time, 1, 8)]
-stop_times[, arrival_time_obj := as.ITime(arrival_time_hhmmss)]
+# Process stop times for peak hours
+all_stop_times[, arrival_time_hhmmss := substr(arrival_time, 1, 8)]
+all_stop_times[, arrival_time_obj := as.ITime(arrival_time_hhmmss)]
 
-peak_stop_times <- stop_times[
+peak_stop_times <- all_stop_times[
   (arrival_time_obj >= morning_peak_start & arrival_time_obj <= morning_peak_end) |
   (arrival_time_obj >= evening_peak_start & arrival_time_obj <= evening_peak_end)
 ]
 
 # Join with trips to get route information
-peak_stop_times <- merge(peak_stop_times, trips[, .(trip_id, route_id)], by = "trip_id")
+peak_stop_times <- merge(
+  peak_stop_times, 
+  weekday_trips[, .(unique_trip_id, unique_route_id, agency)], 
+  by = c("unique_trip_id", "agency")
+)
 
 # Count unique routes per stop during peak hours
-routes_per_stop <- peak_stop_times[, .(unique_routes = uniqueN(route_id)), by = stop_id]
+routes_per_stop <- peak_stop_times[, .(unique_routes = uniqueN(unique_route_id)), by = .(unique_stop_id, agency)]
 
-# Calculate frequency of service for each route at each stop during peak hours
-# We need to group by stop_id and route_id, then calculate time differences
-peak_stop_times <- peak_stop_times[order(stop_id, route_id, arrival_time_obj)]
-
-# This is a simplified approach - in a full analysis, we would calculate actual headways
 # Get stops with 2+ routes
 multi_route_stops <- routes_per_stop[unique_routes >= 2]
 
-# Filter to bus stops only (not stations) that have multiple routes
-bus_stops <- stops[location_type == 0 | is.na(location_type)]
-bus_hub_candidates <- bus_stops[stop_id %in% multi_route_stops$stop_id]
+# Filter to bus stops only (not rail stations)
+# For CTA: location_type == 0 or NA, and not in rail_stops
+# For Pace: All stops are bus stops
+# For Metra: None (all are rail)
+bus_stops <- all_stops[
+  (agency == "cta" & (is.na(location_type) | location_type == 0) & 
+   !(unique_stop_id %in% rail_stops$unique_stop_id)) |
+  (agency == "pace")
+]
+
+# Find bus stops that have multiple routes
+bus_hub_candidates <- bus_stops[unique_stop_id %in% multi_route_stops$unique_stop_id]
 
 # For this demonstration, we'll assume these bus stops meet the frequency criterion
 # In a real analysis, you would need to calculate actual frequencies
@@ -188,6 +365,13 @@ bus_hubs_sf <- st_as_sf(bus_hub_candidates, coords = c("stop_lon", "stop_lat"), 
 all_hubs_sf <- rbind(
   cbind(rail_stations_sf, type = "rail"),
   cbind(bus_hubs_sf, type = "bus_hub")
+)
+
+# Add agency information to the combined hubs
+all_hubs_sf$agency_name <- factor(
+  all_hubs_sf$agency,
+  levels = c("cta", "pace", "metra"),
+  labels = c("CTA", "Pace", "Metra")
 )
 ```
 ```{r create_buffers}
@@ -216,8 +400,14 @@ half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
 
 # We'll use Leaflet to create an interactive map showing the affected areas.
 
+# Define a color palette for transit agencies
+agency_pal <- colorFactor(
+  palette = c("#009CDE", "#814C9E", "#E31837"),  # CTA blue, Pace purple, Metra red
+  domain = all_hubs_sf$agency_name
+)
+
 # Define a color palette for transit hub types
-pal <- colorFactor(
+type_pal <- colorFactor(
   palette = c("blue", "green"),
   domain = all_hubs_sf$type
 )
@@ -234,10 +424,33 @@ map <- leaflet() %>%
     opacity = 0.7,
     group = "Affected Areas (1/2 Mile from Hubs)"
   ) %>%
+  # Add points for transit hubs, colored by agency
+  addCircleMarkers(
+    data = all_hubs_sf,
+    radius = 3,
+    color = ~agency_pal(agency_name),
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    group = "Transit Hubs by Agency",
+    popup = ~paste0(
+      "<strong>", stop_name, "</strong><br>",
+      "Agency: ", agency_name, "<br>",
+      "Type: ", type, "<br>",
+      "Stop ID: ", stop_id
+    )
+  ) %>%
+  # Add layer controls
+  addLayersControl(
+    baseGroups = c("CartoDB Positron"),
+    overlayGroups = c("Affected Areas (1/2 Mile from Hubs)", "Transit Hubs by Agency"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  # Add legend for agencies
   addLegend(
     position = "bottomright",
-    colors = c("purple"),
-    labels = c("CTA Transit-served Areas Affected by the People Over Parking Act"),
+    colors = c("purple", "#009CDE", "#814C9E", "#E31837"),
+    labels = c("Transit-served Areas Affected by the People Over Parking Act", 
+               "CTA", "Pace", "Metra"),
     opacity = 0.7
   ) %>%
   addFullscreenControl() %>%
@@ -270,11 +483,24 @@ chicago_area_sqmi <- 234
 # Calculate percentage of Chicago potentially affected
 pct_affected <- as.numeric(affected_area_sqmi) / chicago_area_sqmi * 100
 
+# Count the number of transit hubs by agency
+hub_counts <- table(all_hubs_sf$agency_name)
+
 # For a more accurate analysis, we would use actual city boundaries
 # and calculate the exact intersection, but this gives a rough estimate
 ```
 
 The analysis shows that approximately `r round(as.numeric(affected_area_sqmi), 2)` square miles of Chicago's area would be affected by the People Over Parking Act, which is roughly `r round(pct_affected, 1)`% of the city's total area.
+
+### Transit Hub Distribution by Agency
+
+The analysis includes transit hubs from three agencies:
+
+- CTA: `r hub_counts["CTA"]` transit hubs
+- Pace: `r hub_counts["Pace"]` transit hubs
+- Metra: `r hub_counts["Metra"]` transit hubs
+
+This comprehensive approach ensures that all qualifying transit hubs in the Chicagoland region are included in the analysis, providing a more accurate representation of areas that would be affected by the People Over Parking Act.
 
 ## Resources and References
 
