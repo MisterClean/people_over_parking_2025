@@ -51,29 +51,38 @@ library(mapview)
 We'll download the latest CTA GTFS data, extract it, and process it to identify public transportation hubs according to the bill's definition.
 
 ```{r download_gtfs}
-# Set the URL for the GTFS download
-gtfs_url <- "https://www.transitchicago.com/downloads/sch_data/"
+# Fixed direct URL for the GTFS download
+zip_link <- "https://www.transitchicago.com/downloads/sch_data/google_transit.zip"
 
 # Create a temporary directory to store the downloaded file
 temp_dir <- tempdir()
 temp_file <- file.path(temp_dir, "cta_gtfs.zip")
 
-# Visit the GTFS page to get the current download link
-page_content <- httr::GET(gtfs_url)
-page_text <- httr::content(page_content, "text")
-
-# Extract the actual ZIP file URL (this may need adjustment based on the actual page structure)
-zip_link <- str_extract(page_text, "https://www\\.transitchicago\\.com/downloads/sch_data/[^\"']+\\.zip")
-
-if(is.na(zip_link)) {
-  # Use a fixed fallback URL if the extraction fails
-  # CTA typically uses a standard name for their GTFS feed
-  zip_link <- "https://www.transitchicago.com/downloads/sch_data/google_transit.zip"
-  message("Using fallback URL: ", zip_link)
+# Create a cache directory
+cache_dir <- "gtfs_cache"
+if (!dir.exists(cache_dir)) {
+  dir.create(cache_dir)
 }
+cache_file <- file.path(cache_dir, "cta_gtfs.zip")
 
-# Download the GTFS ZIP file
-download.file(zip_link, temp_file, mode = "wb")
+# Try to download or use cached data
+tryCatch({
+  # Download the GTFS ZIP file with a timeout
+  options(timeout = 60)  # Increase timeout to 60 seconds
+  download.file(zip_link, temp_file, mode = "wb", quiet = TRUE)
+  
+  # Save a copy to cache
+  file.copy(temp_file, cache_file, overwrite = TRUE)
+  
+}, error = function(e) {
+  message("Download failed: ", e$message)
+  if (file.exists(cache_file)) {
+    message("Using cached GTFS data from ", cache_file)
+    file.copy(cache_file, temp_file, overwrite = TRUE)
+  } else {
+    stop("Could not download GTFS data and no cache available.", call. = FALSE)
+  }
+})
 
 # Extract the files
 gtfs_files <- unzip(temp_file, exdir = temp_dir)
