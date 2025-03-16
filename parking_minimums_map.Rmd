@@ -562,27 +562,25 @@ map <- leaflet() %>%
 map
 ```
 
-## How much of Chicago would be free from parking mandates?
+## How much of the Illinois portion of the Chicago MSA would be free from parking mandates?
 
 ```{r analyze_areas}
 # Calculate the total area affected in square miles
 affected_area_sqft <- st_area(all_affected_areas)
 affected_area_sqmi <- units::set_units(affected_area_sqft, "mi^2")
 
-# Get a rough estimate of Chicago's total area (approximately 234 sq mi)
-chicago_area_sqmi <- 234
+# Total area of the Illinois portion of the Chicago MSA (calculated using tigris package)
+# This includes Cook, DuPage, Kane, Lake, McHenry, and Will counties
+chicago_il_msa_area_sqmi <- 5323.82
 
-# Calculate percentage of Chicago potentially affected
-pct_affected <- as.numeric(affected_area_sqmi) / chicago_area_sqmi * 100
+# Calculate percentage of the Illinois MSA potentially affected
+pct_affected <- as.numeric(affected_area_sqmi) / chicago_il_msa_area_sqmi * 100
 
 # Count the number of transit hubs by agency
 hub_counts <- table(all_hubs_sf$agency_name)
-
-# For a more accurate analysis, we would use actual city boundaries
-# and calculate the exact intersection, but this gives a rough estimate
 ```
 
-The analysis shows that approximately `r round(as.numeric(affected_area_sqmi), 2)` square miles of Chicago's area would be affected by the People Over Parking Act, which is roughly `r round(pct_affected, 1)`% of the city's total area.
+The analysis shows that approximately `r round(as.numeric(affected_area_sqmi), 2)` square miles of the Illinois portion of the Chicago Metropolitan Statistical Area would be affected by the People Over Parking Act, which is roughly `r round(pct_affected, 1)`% of the Illinois MSA's total land area (5,323.82 square miles).
 
 ### Note on Bus Transit Hub Criteria
 
@@ -611,7 +609,7 @@ This methodology ensures that our analysis accurately reflects the definition of
 
 ```{r agency_comparison, fig.width=8, fig.height=4}
 # Create a data frame for visualization
-agency_stats <- route_headways[, .(
+agency_stats <- route_headways[agency != "metra", .(
   total_routes = .N,
   qualifying_routes = sum(meets_frequency),
   pct_qualifying = sum(meets_frequency) / .N * 100
