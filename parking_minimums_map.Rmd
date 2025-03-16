@@ -364,7 +364,7 @@ bus_stops <- all_stops[
   (agency == "pace")
 ]
 
-# Calculate the frequency for each route at each stop during peak hours
+# Calculate the minimum frequency between runs for each route at each stop
 # First, separate morning and evening peak periods
 morning_peak_times <- peak_stop_times[
   arrival_time_obj >= morning_peak_start & arrival_time_obj <= morning_peak_end
@@ -592,6 +592,22 @@ This analysis strictly applies the frequency criterion from the legislation, req
 - Pace routes: Only 16.04% meet the 15-minute frequency criterion
 
 This difference in service frequency significantly impacts which areas qualify under the legislation, with a much higher concentration of qualifying hubs in areas served by CTA (primarily Chicago) compared to suburban areas served by Pace.
+
+#### Methodology for Frequency Calculation
+
+To accurately identify qualifying bus transit hubs, we implemented the following approach:
+
+1. **Minimum Frequency Calculation**: For each route at each stop, we calculated the time difference between consecutive arrivals during peak hours (7-9 AM and 4-6 PM).
+
+2. **Headway Analysis**: We converted these time differences to minutes and calculated the median headway (time between buses) for each route at each stop.
+
+3. **Frequency Criterion**: Routes with a median headway of 15 minutes or less were identified as meeting the frequency criterion specified in the legislation.
+
+4. **Hub Qualification**: Bus stops were classified as transit hubs only if they:
+   - Serve 2 or more bus routes
+   - All routes at the stop meet the 15-minute frequency criterion
+
+This methodology ensures that our analysis accurately reflects the definition of a "public transportation hub" as specified in the People Over Parking Act, which requires "a frequency of bus service interval of 15 minutes or less during the morning and afternoon peak commute periods."
 
 ```{r agency_comparison, fig.width=8, fig.height=4}
 # Create a data frame for visualization
