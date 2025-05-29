@@ -1,0 +1,450 @@
+---
+title: "Transit-Supportive Development Authority Analysis"
+author: "Michael McLean • Abundant Housing Illinois member • mclean.bsky.social"
+date: "May 28, 2025"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+    self_contained: true
+    output_dir: "docs"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Will Chicagoland Transit Agencies Become Real Estate Developers?
+
+On May 28th 2025, an [omnibus bill](https://www.ilga.gov/legislation/104/SB/10400SB2111ham001.htm) was filed in Illinois that would allow transit agencies (Metra, CTA, Pace) to develop land around their train and bus stations.
+
+According to the legislation, "transit-supportive development" is defined as residential, commercial, and governmental facilities and supporting infrastructure improvements that:
+
+1.  Are designed to facilitate access to and use of public transit or public trails
+2.  Are located within either:
+    -   **One-half mile** of a public transportation station, or
+    -   **One-eighth mile** of a bus stop on a public transportation bus route
+
+The Board of Trustees of any Transit District may acquire, construct, own, operate, or maintain transit-supportive development in the metropolitan region and may exercise all powers necessary to accomplish the purposes of this Section.
+
+This analysis visualizes the areas around Chicago that would fall under this authority.
+
+**Note:** at this time, this map does not include 'trail-supportive development', which would allow the agencies to develop land surrounding public trails.
+
+```{r packages}
+# Install packages if not already installed
+required_packages <- c("tidyverse", "sf", "leaflet", "leaflet.extras", 
+                       "data.table", "zip", "httr", "lubridate", "mapview")
+
+new_packages <- required_packages[!required_packages %in% installed.packages()[,"Package"]]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load required packages
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(data.table)
+library(zip)
+library(httr)
+library(lubridate)
+library(mapview)
+```
+
+```{r download_gtfs, results='hide'}
+## Download and Process GTFS Data
+
+## We'll download the latest GTFS data for all three transit agencies (CTA, Pace, and Metra),
+## extract them, and process them to identify public transportation stations and bus stops.
+
+# Function to download and extract GTFS data
+download_and_extract_gtfs <- function(agency_name, zip_link) {
+  # Create a temporary directory to store the downloaded file
+  temp_dir <- file.path(tempdir(), agency_name)
+  if (!dir.exists(temp_dir)) {
+    dir.create(temp_dir, recursive = TRUE)
+  }
+  
+  temp_file <- file.path(temp_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  # Create a cache directory
+  cache_dir <- "gtfs_cache"
+  if (!dir.exists(cache_dir)) {
+    dir.create(cache_dir)
+  }
+  cache_file <- file.path(cache_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  # Try to download or use cached data
+  tryCatch({
+    # Download the GTFS ZIP file with a timeout and user agent
+    options(timeout = 60)  # Increase timeout to 60 seconds
+    
+    # Use httr::GET with a user agent to avoid 403 Forbidden errors
+    response <- httr::GET(
+      zip_link,
+      httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+      httr::write_disk(temp_file, overwrite = TRUE),
+      httr::timeout(60)
+    )
+    
+    # Check if the request was successful
+    if (httr::status_code(response) != 200) {
+      stop(paste0("Failed to download with status code: ", httr::status_code(response)))
+    }
+    
+    # Save a copy to cache
+    file.copy(temp_file, cache_file, overwrite = TRUE)
+    
+  }, error = function(e) {
+    message(paste0("Download failed for ", agency_name, ": ", e$message))
+    if (file.exists(cache_file)) {
+      message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+      file.copy(cache_file, temp_file, overwrite = TRUE)
+    } else {
+      stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
+    }
+  })
+  
+  # Extract the files
+  gtfs_files <- unzip(temp_file, exdir = temp_dir)
+  
+  # Return the directory containing the extracted files
+  return(temp_dir)
+}
+
+# Download and extract GTFS data for all three agencies
+cta_dir <- download_and_extract_gtfs("cta", "https://www.transitchicago.com/downloads/sch_data/google_transit.zip")
+pace_dir <- download_and_extract_gtfs("pace", "https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip")
+metra_dir <- download_and_extract_gtfs("metra", "https://schedules.metrarail.com/gtfs/schedule.zip")
+```
+
+```{r process_stops}
+## Identify Public Transportation Stations and Bus Stops
+
+## Now we'll process the GTFS data from all three agencies to identify public transportation stations and bus stops.
+
+# Function to read and normalize GTFS data
+read_normalize_gtfs <- function(agency_name, agency_dir) {
+  # Read the stops data
+  stops_file <- file.path(agency_dir, "stops.txt")
+  if (file.exists(stops_file)) {
+    stops <- fread(stops_file)
+    # Add agency identifier
+    stops[, agency := agency_name]
+    
+    # Normalize column names and types
+    if (!"location_type" %in% names(stops)) {
+      stops[, location_type := NA_integer_]
+    }
+    if (!"parent_station" %in% names(stops)) {
+      stops[, parent_station := NA_character_]
+    }
+    
+    # Ensure stop_id is character
+    stops[, stop_id := as.character(stop_id)]
+    
+    # Create a unique ID that includes the agency
+    stops[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+  } else {
+    stops <- data.table(
+      stop_id = character(),
+      stop_name = character(),
+      stop_lat = numeric(),
+      stop_lon = numeric(),
+      location_type = integer(),
+      parent_station = character(),
+      agency = character(),
+      unique_stop_id = character()
+    )
+  }
+  
+  # Read the routes data
+  routes_file <- file.path(agency_dir, "routes.txt")
+  if (file.exists(routes_file)) {
+    routes <- fread(routes_file)
+    # Add agency identifier
+    routes[, agency := agency_name]
+    
+    # Normalize route_id to character
+    routes[, route_id := as.character(route_id)]
+    
+    # Create a unique ID that includes the agency
+    routes[, unique_route_id := paste0(agency_name, "_", route_id)]
+  } else {
+    routes <- data.table(
+      route_id = character(),
+      route_type = integer(),
+      agency = character(),
+      unique_route_id = character()
+    )
+  }
+  
+  # Return the normalized tables
+  return(list(
+    stops = stops,
+    routes = routes
+  ))
+}
+
+# Read and normalize GTFS data for all three agencies
+cta_data <- read_normalize_gtfs("cta", cta_dir)
+pace_data <- read_normalize_gtfs("pace", pace_dir)
+metra_data <- read_normalize_gtfs("metra", metra_dir)
+
+# Combine data from all agencies
+all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops), fill = TRUE)
+all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes), fill = TRUE)
+
+# Identify rail transit stations across all agencies
+# CTA: route_type = 1 (subway/metro)
+# Metra: route_type = 2 (rail)
+# Pace: No rail routes
+rail_routes <- all_routes[route_type %in% c(1, 2)]
+
+# For CTA, use parent_station or location_type to identify stations
+cta_rail_stops <- all_stops[
+  agency == "cta" & 
+  ((!is.na(parent_station) & parent_station != "") | 
+   (!is.na(location_type) & location_type == 1))
+]
+
+# For Metra, all stops are rail stations, but filter out Wisconsin stations
+# The Illinois-Wisconsin border is approximately at 42.5 degrees latitude
+metra_rail_stops <- all_stops[agency == "metra" & stop_lat <= 42.5]
+
+# Combine all rail stations
+rail_stops <- rbindlist(list(cta_rail_stops, metra_rail_stops), fill = TRUE)
+
+# Create a spatial object for rail stations
+rail_stations_sf <- st_as_sf(rail_stops, coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# Identify all bus stops (CTA and Pace)
+# For CTA: location_type == 0 or NA, and not in rail_stops
+# For Pace: All stops are bus stops
+bus_stops <- all_stops[
+  (agency == "cta" & (is.na(location_type) | location_type == 0) & 
+   !(unique_stop_id %in% rail_stops$unique_stop_id)) |
+  (agency == "pace")
+]
+
+# Create a spatial object for bus stops
+bus_stops_sf <- st_as_sf(bus_stops, coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# Add type column to both datasets
+rail_stations_sf$type <- "rail_station"
+bus_stops_sf$type <- "bus_stop"
+
+# Add agency information to both datasets
+rail_stations_sf$agency_name <- factor(
+  rail_stations_sf$agency,
+  levels = c("cta", "pace", "metra"),
+  labels = c("CTA", "Pace", "Metra")
+)
+
+bus_stops_sf$agency_name <- factor(
+  bus_stops_sf$agency,
+  levels = c("cta", "pace", "metra"),
+  labels = c("CTA", "Pace", "Metra")
+)
+```
+
+```{r create_buffers}
+## Create Buffers Around Transportation Stations and Stops
+## Now we'll create buffers around each transportation station and stop to visualize the areas affected by the legislation.
+
+# Convert to a projected CRS for accurate buffer calculation
+# NAD83 / Illinois East (ftUS) EPSG:3435 is appropriate for Chicago
+rail_stations_projected <- st_transform(rail_stations_sf, 3435)
+bus_stops_projected <- st_transform(bus_stops_sf, 3435)
+
+# Create a 1/2 mile buffer (2640 feet) around rail stations
+half_mile_buffers <- st_buffer(rail_stations_projected, 2640)
+
+# Create a 1/8 mile buffer (660 feet) around bus stops
+eighth_mile_buffers <- st_buffer(bus_stops_projected, 660)
+
+# Union all buffers to create a single polygon that shows all affected areas
+rail_affected_areas <- st_union(half_mile_buffers)
+bus_affected_areas <- st_union(eighth_mile_buffers)
+all_affected_areas <- st_union(c(rail_affected_areas, bus_affected_areas))
+
+# Convert back to WGS84 for mapping
+rail_affected_areas_wgs84 <- st_transform(rail_affected_areas, 4326)
+bus_affected_areas_wgs84 <- st_transform(bus_affected_areas, 4326)
+all_affected_areas_wgs84 <- st_transform(all_affected_areas, 4326)
+half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
+eighth_mile_buffers_wgs84 <- st_transform(eighth_mile_buffers, 4326)
+```
+
+## Where would transit agencies have development authority?
+
+```{r create_map}
+# We'll use Leaflet to create an interactive map showing the affected areas.
+
+# Define a color palette for transit agencies
+agency_pal <- colorFactor(
+  palette = c("#009CDE", "#814C9E", "#E31837"),  # CTA blue, Pace purple, Metra red
+  domain = c("CTA", "Pace", "Metra")
+)
+
+# Define a color palette for transit hub types
+type_pal <- colorFactor(
+  palette = c("blue", "green"),
+  domain = c("rail_station", "bus_stop")
+)
+
+# Create a leaflet map
+map <- leaflet() %>%
+  setView(lng = -87.6079, lat = 41.8917, zoom = 9) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # Add 1/2 mile buffers around rail stations
+  addPolygons(
+    data = rail_affected_areas_wgs84,
+    fillColor = "blue",
+    fillOpacity = 0.25,
+    weight = 1,
+    color = "blue",
+    opacity = 0.7,
+    group = "Rail Station Areas (1/2 Mile)"
+  ) %>%
+  # Add 1/8 mile buffers around bus stops
+  addPolygons(
+    data = bus_affected_areas_wgs84,
+    fillColor = "green",
+    fillOpacity = 0.25,
+    weight = 1,
+    color = "green",
+    opacity = 0.7,
+    group = "Bus Stop Areas (1/8 Mile)"
+  ) %>%
+  # Add combined affected areas
+  addPolygons(
+    data = all_affected_areas_wgs84,
+    fillColor = "purple",
+    fillOpacity = 0.25,
+    weight = 1,
+    color = "purple",
+    opacity = 0.7,
+    group = "All Affected Areas"
+  ) %>%
+  # Add points for rail stations
+  addCircleMarkers(
+    data = rail_stations_sf,
+    radius = 3,
+    color = ~agency_pal(agency_name),
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    group = "Rail Stations",
+    popup = ~paste0(
+      "<strong>", stop_name, "</strong><br>",
+      "Agency: ", agency_name, "<br>",
+      "Type: Rail Station<br>",
+      "Stop ID: ", stop_id
+    )
+  ) %>%
+  # Add points for bus stops (sample to avoid overloading the map)
+  addCircleMarkers(
+    data = bus_stops_sf[sample(nrow(bus_stops_sf), min(1000, nrow(bus_stops_sf))), ],
+    radius = 2,
+    color = ~agency_pal(agency_name),
+    stroke = FALSE,
+    fillOpacity = 0.6,
+    group = "Bus Stops (Sample)",
+    popup = ~paste0(
+      "<strong>", stop_name, "</strong><br>",
+      "Agency: ", agency_name, "<br>",
+      "Type: Bus Stop<br>",
+      "Stop ID: ", stop_id
+    )
+  ) %>%
+  # Add layer controls
+  addLayersControl(
+    baseGroups = c("CartoDB Positron"),
+    overlayGroups = c(
+      "All Affected Areas",
+      "Rail Station Areas (1/2 Mile)",
+      "Bus Stop Areas (1/8 Mile)",
+      "Rail Stations",
+      "Bus Stops (Sample)"
+    ),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  # Add legend
+  addLegend(
+    position = "bottomright",
+    colors = c("purple", "blue", "green", "#009CDE", "#814C9E", "#E31837"),
+    labels = c(
+      "All Transit-Supportive Development Areas", 
+      "Rail Station Areas (1/2 Mile)",
+      "Bus Stop Areas (1/8 Mile)",
+      "CTA", 
+      "Pace", 
+      "Metra"
+    ),
+    opacity = 0.7
+  ) %>%
+  addFullscreenControl() %>%
+  addMeasure(
+    position = "bottomleft",
+    primaryLengthUnit = "miles",
+    primaryAreaUnit = "sqmiles",
+    activeColor = "#3D535D",
+    completedColor = "#7D4479"
+  ) %>%
+  addMiniMap(
+    tiles = providers$CartoDB.Positron,
+    toggleDisplay = TRUE
+  ) %>%
+  # Hide some layers by default to avoid overwhelming the map
+  hideGroup("Bus Stops (Sample)") %>%
+  hideGroup("Rail Station Areas (1/2 Mile)") %>%
+  hideGroup("Bus Stop Areas (1/8 Mile)")
+
+# Display the map
+map
+```
+
+```{r calculate_counts}
+# Calculate counts by agency
+rail_station_counts <- table(rail_stations_sf$agency_name)
+bus_stop_counts <- table(bus_stops_sf$agency_name)
+```
+
+### Transit Infrastructure Distribution
+
+The analysis includes:
+
+-   **Rail Stations**: `r sum(rail_station_counts)` total
+    -   CTA: `r rail_station_counts["CTA"]` stations
+    -   Metra: `r rail_station_counts["Metra"]` stations
+-   **Bus Stops**: `r sum(bus_stop_counts)` total
+    -   CTA: `r bus_stop_counts["CTA"]` stops
+    -   Pace: `r bus_stop_counts["Pace"]` stops
+
+#### The Value-Capture Model
+
+Instead of relying solely on fares and government subsidies, transit agencies develop real estate around their stations and capture the increased property values that transit access creates. This generates revenue streams that can cross-subsidize transit operations, fund system expansion, and keep fares affordable.
+
+**Successful Examples:** - **Japan Railway (JR) companies**: Generate \~60% of revenue from real estate development around stations - **Hong Kong's MTR Corporation**: Uses "Rail + Property" model to fund expansion and maintain profitability - **Singapore's SMRT**: Integrates transit stations into residential and commercial developments - **Tokyo Metro**: Develops shopping centers and mixed-use projects at station sites - **Tokyu Corporation (Japan)**: Pioneer of the model, developing entire neighborhoods around rail lines
+
+#### Applying This to Chicagoland
+
+The Local Mass Transit District Act amendment would give CTA, Metra, and Pace similar development powers. Instead of watching private developers capture transit-created value while agencies struggle with funding, Chicago's transit systems could develop their own parking lots and station areas into mixed-use projects that generate ongoing revenue to improve service.
+
+The transit-supportive development authority granted by this legislation could have significant implications for development in the Chicago region:
+
+1.  **Increased Transit-Oriented Development**: Transit agencies would have the authority to develop land around their stations and stops, potentially leading to more housing, commercial, and mixed-use development near transit.
+
+2.  **Expanded Housing Options**: Development near transit could increase housing supply and potentially improve affordability in transit-accessible areas.
+
+3.  **Reduced Car Dependency**: More development near transit could reduce car dependency and increase transit ridership.
+
+4.  **Economic Development**: Transit-supportive development could stimulate economic development in areas around transit stations and stops.
+
+## Resources and References
+
+-   [Chicago Transit Authority GTFS Data](https://www.transitchicago.com/downloads/sch_data/)
+-   [Pace Suburban Bus GTFS Data](https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip)
+-   [Metra Commuter Rail GTFS Data](https://schedules.metrarail.com/gtfs/schedule.zip)
