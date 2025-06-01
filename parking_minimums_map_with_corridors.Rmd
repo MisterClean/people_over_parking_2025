@@ -1,0 +1,654 @@
+---
+title: "The Illinois People Over Parking Act"
+author: "Michael McLean - Member, Abundant Housing Illinois"
+date: "March 14, 2025"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+    self_contained: true
+    output_dir: "docs"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Understanding Parking Mandates
+
+Parking mandates, also known as parking minimums, are zoning regulations that require developers to build a minimum number of parking spaces with new housing and commercial developments. These mandates typically specify a certain number of parking spaces per unit of housing, square footage of retail space, or other metrics depending on the development type.
+
+#### Why Parking Mandates Are Costly:
+
+-   **Increased Housing Costs**: Each parking space can cost \$30,000-\$75,000 to build, significantly raising the cost of housing development and ultimately housing prices.
+-   **Reduced Housing Supply**: Land used for parking cannot be used for additional housing units, limiting the overall housing supply.
+-   **Environmental Impact**: Excessive parking encourages car dependency, increasing traffic congestion and carbon emissions.
+-   **Inefficient Land Use**: Parking lots create "dead spaces" in urban areas that could otherwise be used for housing, businesses, or public spaces.
+-   **Economic Burden**: Many parking spaces sit empty much of the time, representing wasted resources and opportunity costs.
+
+#### Why Parking Mandates Should Be Repealed:
+
+-   **Market-Based Solutions**: Developers can better determine the appropriate amount of parking based on actual demand rather than arbitrary requirements.
+-   **Transit-Oriented Development**: Eliminating parking mandates near transit encourages development that leverages existing public transportation infrastructure.
+-   **Affordability**: Reducing or eliminating parking requirements can make housing more affordable and accessible.
+-   **Sustainability**: Less parking promotes walking, cycling, and public transit use, reducing carbon emissions.
+-   **Vibrant Communities**: Space previously dedicated to parking can be repurposed for housing, businesses, and community amenities.
+
+### Enter: The People Over Parking Act
+
+This analysis examines the potential impact of new legislation passed in Illinois [People Over Parking Act](https://www.ilga.gov/legislation/104/HB/10400HB3438sam003.htm) on Chicagoland.
+
+According to the updated bill, minimum parking requirements are prohibited for development projects located within:
+
+- **1/2 mile of public transportation hubs**, defined as:
+  - A rail transit station
+  - A boat or ferry terminal served by either a bus connection stop or rail transit station
+  - A bus connection stop of 2 or more major bus routes with a frequency of service interval of 15 minutes or less during peak commute periods
+
+- **1/8 mile of public transportation corridors**, defined as:
+  - A street on which there is at least one bus route with a combined frequency of bus service interval of 15 minutes or less during the morning and afternoon peak commute periods
+
+```{r packages}
+# Install packages if not already installed
+required_packages <- c("tidyverse", "sf", "leaflet", "leaflet.extras", 
+                       "data.table", "zip", "httr", "lubridate", "mapview")
+
+new_packages <- required_packages[!required_packages %in% installed.packages()[,"Package"]]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load required packages
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(data.table)
+library(zip)
+library(httr)
+library(lubridate)
+library(mapview)
+
+# Disable s2 processing to avoid geometry validation issues
+sf_use_s2(FALSE)
+```
+
+```{r load_existing_data}
+## Load Existing Hub Data and Corridor Data
+
+# Load the existing hub processing results (from the original analysis)
+# We'll reuse the hub identification logic from the original script
+
+# Function to download and extract GTFS data (reused from main script)
+download_and_extract_gtfs <- function(agency_name, zip_link) {
+  temp_dir <- file.path(tempdir(), agency_name)
+  if (!dir.exists(temp_dir)) {
+    dir.create(temp_dir, recursive = TRUE)
+  }
+  
+  temp_file <- file.path(temp_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  cache_dir <- "gtfs_cache"
+  if (!dir.exists(cache_dir)) {
+    dir.create(cache_dir)
+  }
+  cache_file <- file.path(cache_dir, paste0(agency_name, "_gtfs.zip"))
+  
+  tryCatch({
+    options(timeout = 60)
+    
+    response <- httr::GET(
+      zip_link,
+      httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+      httr::write_disk(temp_file, overwrite = TRUE),
+      httr::timeout(60)
+    )
+    
+    if (httr::status_code(response) != 200) {
+      stop(paste0("Failed to download with status code: ", httr::status_code(response)))
+    }
+    
+    file.copy(temp_file, cache_file, overwrite = TRUE)
+    
+  }, error = function(e) {
+    message(paste0("Download failed for ", agency_name, ": ", e$message))
+    if (file.exists(cache_file)) {
+      message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+      file.copy(cache_file, temp_file, overwrite = TRUE)
+    } else {
+      stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
+    }
+  })
+  
+  gtfs_files <- unzip(temp_file, exdir = temp_dir)
+  return(temp_dir)
+}
+
+# Function to read and normalize GTFS data
+read_normalize_gtfs <- function(agency_name, agency_dir) {
+  # Read the stops data
+  stops_file <- file.path(agency_dir, "stops.txt")
+  if (file.exists(stops_file)) {
+    stops <- fread(stops_file)
+    stops[, agency := agency_name]
+    
+    if (!"location_type" %in% names(stops)) {
+      stops[, location_type := NA_integer_]
+    }
+    if (!"parent_station" %in% names(stops)) {
+      stops[, parent_station := NA_character_]
+    }
+    
+    stops[, stop_id := as.character(stop_id)]
+    stops[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+  } else {
+    stops <- data.table(
+      stop_id = character(),
+      stop_name = character(),
+      stop_lat = numeric(),
+      stop_lon = numeric(),
+      location_type = integer(),
+      parent_station = character(),
+      agency = character(),
+      unique_stop_id = character()
+    )
+  }
+  
+  # Read the routes data
+  routes_file <- file.path(agency_dir, "routes.txt")
+  if (file.exists(routes_file)) {
+    routes <- fread(routes_file)
+    routes[, agency := agency_name]
+    routes[, route_id := as.character(route_id)]
+    routes[, unique_route_id := paste0(agency_name, "_", route_id)]
+  } else {
+    routes <- data.table(
+      route_id = character(),
+      route_type = integer(),
+      agency = character(),
+      unique_route_id = character()
+    )
+  }
+  
+  # Read trips data
+  trips_file <- file.path(agency_dir, "trips.txt")
+  if (file.exists(trips_file)) {
+    trips <- fread(trips_file)
+    trips[, agency := agency_name]
+    trips[, trip_id := as.character(trip_id)]
+    trips[, route_id := as.character(route_id)]
+    trips[, unique_trip_id := paste0(agency_name, "_", trip_id)]
+    trips[, unique_route_id := paste0(agency_name, "_", route_id)]
+  } else {
+    trips <- data.table(
+      trip_id = character(),
+      route_id = character(),
+      service_id = character(),
+      agency = character(),
+      unique_trip_id = character(),
+      unique_route_id = character()
+    )
+  }
+  
+  # Read stop_times data
+  stop_times_file <- file.path(agency_dir, "stop_times.txt")
+  if (file.exists(stop_times_file)) {
+    stop_times <- fread(stop_times_file)
+    stop_times[, agency := agency_name]
+    stop_times[, trip_id := as.character(trip_id)]
+    stop_times[, stop_id := as.character(stop_id)]
+    stop_times[, unique_trip_id := paste0(agency_name, "_", trip_id)]
+    stop_times[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+  } else {
+    stop_times <- data.table(
+      trip_id = character(),
+      stop_id = character(),
+      arrival_time = character(),
+      departure_time = character(),
+      stop_sequence = integer(),
+      agency = character(),
+      unique_trip_id = character(),
+      unique_stop_id = character()
+    )
+  }
+  
+  # Read calendar data
+  calendar_file <- file.path(agency_dir, "calendar.txt")
+  if (file.exists(calendar_file)) {
+    calendar <- fread(calendar_file)
+    calendar[, agency := agency_name]
+  } else {
+    calendar <- data.table(
+      service_id = character(),
+      monday = integer(),
+      tuesday = integer(),
+      wednesday = integer(),
+      thursday = integer(),
+      friday = integer(),
+      saturday = integer(),
+      sunday = integer(),
+      start_date = integer(),
+      end_date = integer(),
+      agency = character()
+    )
+  }
+  
+  return(list(
+    stops = stops,
+    routes = routes,
+    trips = trips,
+    stop_times = stop_times,
+    calendar = calendar
+  ))
+}
+```
+
+```{r download_gtfs, results='hide'}
+## Download and Process GTFS Data for Hubs
+
+# Download and extract GTFS data for all three agencies
+cta_dir <- download_and_extract_gtfs("cta", "https://www.transitchicago.com/downloads/sch_data/google_transit.zip")
+pace_dir <- download_and_extract_gtfs("pace", "https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip")
+metra_dir <- download_and_extract_gtfs("metra", "https://schedules.metrarail.com/gtfs/schedule.zip")
+
+# Read and normalize GTFS data for all three agencies
+cta_data <- read_normalize_gtfs("cta", cta_dir)
+pace_data <- read_normalize_gtfs("pace", pace_dir)
+metra_data <- read_normalize_gtfs("metra", metra_dir)
+
+# Combine data from all agencies
+all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops), fill = TRUE)
+all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes), fill = TRUE)
+all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips), fill = TRUE)
+all_stop_times <- rbindlist(list(cta_data$stop_times, pace_data$stop_times, metra_data$stop_times), fill = TRUE)
+all_calendar <- rbindlist(list(cta_data$calendar, pace_data$calendar, metra_data$calendar), fill = TRUE)
+```
+
+```{r process_hubs}
+## Identify Public Transportation Hubs (Original Logic)
+
+# Identify rail transit stations across all agencies
+rail_routes <- all_routes[route_type %in% c(1, 2)]
+
+# For CTA, use parent_station or location_type to identify stations
+cta_rail_stops <- all_stops[
+  agency == "cta" & 
+  ((!is.na(parent_station) & parent_station != "") | 
+   (!is.na(location_type) & location_type == 1))
+]
+
+# For Metra, all stops are rail stations, but filter out Wisconsin stations
+metra_rail_stops <- all_stops[agency == "metra" & stop_lat <= 42.5]
+
+# Combine all rail stations
+rail_stops <- rbindlist(list(cta_rail_stops, metra_rail_stops), fill = TRUE)
+
+# Create a spatial object for rail stations
+rail_stations_sf <- st_as_sf(rail_stops, coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# Process bus hubs using the strict frequency criterion
+weekday_service <- all_calendar[
+  monday == 1 & tuesday == 1 & wednesday == 1 & thursday == 1 & friday == 1, 
+  .(service_id, agency)
+]
+
+weekday_trips <- merge(all_trips, weekday_service, by = c("service_id", "agency"))
+
+# Define peak hours
+morning_peak_start <- as.ITime("07:00:00")
+morning_peak_end <- as.ITime("09:00:00")
+evening_peak_start <- as.ITime("16:00:00")
+evening_peak_end <- as.ITime("18:00:00")
+
+# Process stop times for peak hours
+all_stop_times[, arrival_time_hhmmss := substr(arrival_time, 1, 8)]
+all_stop_times[, arrival_time_obj := as.ITime(arrival_time_hhmmss)]
+
+peak_stop_times <- all_stop_times[
+  (arrival_time_obj >= morning_peak_start & arrival_time_obj <= morning_peak_end) |
+  (arrival_time_obj >= evening_peak_start & arrival_time_obj <= evening_peak_end)
+]
+
+# Join with trips to get route information
+peak_stop_times <- merge(
+  peak_stop_times, 
+  weekday_trips[, .(unique_trip_id, unique_route_id, agency)], 
+  by = c("unique_trip_id", "agency")
+)
+
+# Calculate headways for frequency analysis
+setorder(peak_stop_times, unique_stop_id, unique_route_id, arrival_time_obj)
+
+peak_stop_times[, time_diff := c(NA, diff(as.numeric(arrival_time_obj))), 
+               by = .(unique_stop_id, unique_route_id)]
+
+peak_stop_times[, headway_minutes := time_diff / 60]
+
+# Filter out unreasonable headways
+peak_stop_times <- peak_stop_times[!is.na(headway_minutes) & headway_minutes <= 60]
+
+# Calculate median headway for each route at each stop
+route_headways <- peak_stop_times[, .(
+  median_headway = median(headway_minutes, na.rm = TRUE),
+  num_observations = .N
+), by = .(unique_stop_id, unique_route_id, agency)]
+
+# Filter to routes with sufficient observations
+route_headways <- route_headways[num_observations >= 3]
+
+# Identify routes that meet the 15-minute frequency criterion
+route_headways[, meets_frequency := median_headway <= 15]
+
+# For each stop with multiple routes, check if all routes meet the frequency criterion
+stop_route_counts <- route_headways[, .(
+  total_routes = .N,
+  qualifying_routes = sum(meets_frequency),
+  all_routes_qualify = all(meets_frequency)
+), by = .(unique_stop_id, agency)]
+
+# Filter to stops with 2+ routes where all routes meet frequency criterion
+qualifying_stops <- stop_route_counts[total_routes >= 2 & all_routes_qualify == TRUE]
+
+# Get bus stops (not rail stations)
+bus_stops <- all_stops[
+  (agency == "cta" & (is.na(location_type) | location_type == 0) & 
+   !(unique_stop_id %in% rail_stops$unique_stop_id)) |
+  (agency == "pace")
+]
+
+# Get the full stop information for qualifying bus hubs
+qualifying_bus_hubs <- merge(
+  bus_stops,
+  qualifying_stops[, .(unique_stop_id, agency, total_routes, qualifying_routes)],
+  by = c("unique_stop_id", "agency")
+)
+
+# Create a spatial object for bus hubs
+bus_hubs_sf <- st_as_sf(qualifying_bus_hubs, coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# Ensure both spatial objects have the same columns before combining
+rail_cols <- names(rail_stations_sf)
+bus_cols <- names(bus_hubs_sf)
+
+for (col in setdiff(bus_cols, rail_cols)) {
+  rail_stations_sf[[col]] <- NA
+}
+for (col in setdiff(rail_cols, bus_cols)) {
+  bus_hubs_sf[[col]] <- NA
+}
+
+# Add type column to both
+rail_stations_sf$type <- "rail"
+bus_hubs_sf$type <- "bus_hub"
+
+# Combine all hubs
+all_hubs_sf <- rbind(rail_stations_sf, bus_hubs_sf)
+
+# Add agency information
+all_hubs_sf$agency_name <- factor(
+  all_hubs_sf$agency,
+  levels = c("cta", "pace", "metra"),
+  labels = c("CTA", "Pace", "Metra")
+)
+```
+
+```{r load_corridors}
+## Load Corridor Data
+
+# Load the corridor processing results
+if (file.exists("corridor_results.rds")) {
+  corridor_results <- readRDS("corridor_results.rds")
+  message("Loaded corridor results from file")
+} else {
+  # If corridor results don't exist, run the corridor processing
+  source("add_corridors_to_map.R")
+  corridor_results <- readRDS("corridor_results.rds")
+}
+
+# Extract corridor components
+cta_corridors_union <- corridor_results$cta_corridors_union
+pace_corridors_union <- corridor_results$pace_corridors_union
+all_corridors_union <- corridor_results$all_corridors_union
+```
+
+```{r create_buffers}
+## Create Buffers for Hubs and Combine with Corridors
+
+# Convert hubs to projected CRS for accurate buffer calculation
+all_hubs_projected <- st_transform(all_hubs_sf, 3435)
+
+# Create 1/2 mile buffers around hubs (2640 feet)
+half_mile_buffers <- st_buffer(all_hubs_projected, 2640)
+
+# Union all hub buffers to create a single polygon
+all_hub_areas <- st_union(half_mile_buffers)
+
+# Convert back to WGS84 for mapping
+all_hub_areas_wgs84 <- st_transform(all_hub_areas, 4326)
+half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
+
+# Create separate hub buffers by agency
+cta_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "cta", ]
+pace_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "pace", ]
+metra_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "metra", ]
+
+# Union hub buffers by agency
+cta_hubs_union <- if(nrow(cta_hub_buffers) > 0) st_union(cta_hub_buffers) else st_sfc(crs = 4326)
+pace_hubs_union <- if(nrow(pace_hub_buffers) > 0) st_union(pace_hub_buffers) else st_sfc(crs = 4326)
+metra_hubs_union <- if(nrow(metra_hub_buffers) > 0) st_union(metra_hub_buffers) else st_sfc(crs = 4326)
+
+# Combine all affected areas (hubs + corridors)
+all_affected_areas_combined <- st_union(c(all_hub_areas_wgs84, all_corridors_union))
+```
+
+```{r calculate_areas}
+## Calculate Areas
+
+# Calculate areas in square miles
+hub_area_sqft <- st_area(all_hub_areas_wgs84)
+hub_area_sqmi <- units::set_units(hub_area_sqft, "mi^2")
+
+corridor_area_sqft <- st_area(all_corridors_union)
+corridor_area_sqmi <- units::set_units(corridor_area_sqft, "mi^2")
+
+combined_area_sqft <- st_area(all_affected_areas_combined)
+combined_area_sqmi <- units::set_units(combined_area_sqft, "mi^2")
+
+# Total area of the Illinois portion of the Chicago MSA
+chicago_il_msa_area_sqmi <- 5323.82
+
+# Calculate percentages
+pct_hubs <- as.numeric(hub_area_sqmi) / chicago_il_msa_area_sqmi * 100
+pct_corridors <- as.numeric(corridor_area_sqmi) / chicago_il_msa_area_sqmi * 100
+pct_combined <- as.numeric(combined_area_sqmi) / chicago_il_msa_area_sqmi * 100
+
+# Count hubs and routes
+hub_counts <- table(all_hubs_sf$agency_name)
+qualifying_route_counts <- table(corridor_results$route_frequencies[meets_frequency == TRUE, agency])
+```
+
+## Interactive Map: Areas Affected by the Updated People Over Parking Act
+
+```{r create_map}
+# Define color palettes
+agency_pal <- colorFactor(
+  palette = c("#009CDE", "#814C9E", "#E31837"),  # CTA blue, Pace purple, Metra red
+  domain = all_hubs_sf$agency_name
+)
+
+# Create the interactive map
+map <- leaflet() %>%
+  setView(lng = -87.6079, lat = 41.8917, zoom = 9) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  
+  # Combined affected areas (default visible)
+  addPolygons(
+    data = all_affected_areas_combined,
+    fillColor = "purple",
+    fillOpacity = 0.25,
+    weight = 1,
+    color = "purple",
+    opacity = 0.7,
+    group = "All Affected Areas (Hubs + Corridors)"
+  ) %>%
+  
+  # Hub areas by agency
+  addPolygons(
+    data = cta_hubs_union,
+    fillColor = "#009CDE",
+    fillOpacity = 0.4,
+    weight = 1,
+    color = "#009CDE",
+    opacity = 0.8,
+    group = "CTA Hubs (1/2 mile)"
+  ) %>%
+  addPolygons(
+    data = pace_hubs_union,
+    fillColor = "#814C9E",
+    fillOpacity = 0.4,
+    weight = 1,
+    color = "#814C9E",
+    opacity = 0.8,
+    group = "Pace Hubs (1/2 mile)"
+  ) %>%
+  addPolygons(
+    data = metra_hubs_union,
+    fillColor = "#E31837",
+    fillOpacity = 0.4,
+    weight = 1,
+    color = "#E31837",
+    opacity = 0.8,
+    group = "Metra Hubs (1/2 mile)"
+  ) %>%
+  
+  # Corridor areas by agency
+  addPolygons(
+    data = cta_corridors_union,
+    fillColor = "#009CDE",
+    fillOpacity = 0.3,
+    weight = 1,
+    color = "#009CDE",
+    opacity = 0.6,
+    group = "CTA Corridors (1/8 mile)",
+    dashArray = "5,5"
+  ) %>%
+  addPolygons(
+    data = pace_corridors_union,
+    fillColor = "#814C9E",
+    fillOpacity = 0.3,
+    weight = 1,
+    color = "#814C9E",
+    opacity = 0.6,
+    group = "Pace Corridors (1/8 mile)",
+    dashArray = "5,5"
+  ) %>%
+  
+  # Hub points
+  addCircleMarkers(
+    data = all_hubs_sf,
+    radius = 3,
+    color = ~agency_pal(agency_name),
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    group = "Transit Hub Points",
+    popup = ~paste0(
+      "<strong>", stop_name, "</strong><br>",
+      "Agency: ", agency_name, "<br>",
+      "Type: ", type, "<br>",
+      "Stop ID: ", stop_id
+    )
+  ) %>%
+  
+  # Layer controls
+  addLayersControl(
+    baseGroups = c("CartoDB Positron"),
+    overlayGroups = c(
+      "All Affected Areas (Hubs + Corridors)",
+      "CTA Hubs (1/2 mile)",
+      "Pace Hubs (1/2 mile)", 
+      "Metra Hubs (1/2 mile)",
+      "CTA Corridors (1/8 mile)",
+      "Pace Corridors (1/8 mile)",
+      "Transit Hub Points"
+    ),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  
+  # Hide individual layers by default, show only combined
+  hideGroup(c(
+    "CTA Hubs (1/2 mile)",
+    "Pace Hubs (1/2 mile)", 
+    "Metra Hubs (1/2 mile)",
+    "CTA Corridors (1/8 mile)",
+    "Pace Corridors (1/8 mile)",
+    "Transit Hub Points"
+  )) %>%
+  
+  # Add legend
+  addLegend(
+    position = "bottomright",
+    colors = c("purple", "#009CDE", "#814C9E", "#E31837"),
+    labels = c("All Areas Affected by People Over Parking Act", 
+               "CTA (Hubs: solid, Corridors: dashed)", 
+               "Pace (Hubs: solid, Corridors: dashed)", 
+               "Metra (Hubs only)"),
+    opacity = 0.7
+  ) %>%
+  
+  addFullscreenControl() %>%
+  addMeasure(
+    position = "bottomleft",
+    primaryLengthUnit = "miles",
+    primaryAreaUnit = "sqmiles",
+    activeColor = "#3D535D",
+    completedColor = "#7D4479"
+  ) %>%
+  addMiniMap(
+    tiles = providers$CartoDB.Positron,
+    toggleDisplay = TRUE
+  )
+
+# Display the map
+map
+```
+
+### Area Coverage Summary
+
+The updated analysis shows that approximately **`r round(as.numeric(combined_area_sqmi), 2)` square miles** of the Illinois portion of the Chicago Metropolitan Statistical Area would be affected by the People Over Parking Act with the corridor provisions, which is roughly **`r round(pct_combined, 1)`%** of the Illinois MSA's total land area (5,323.82 square miles).
+
+**Breakdown by Provision:**
+- **Transit Hubs (1/2 mile buffers)**: `r round(as.numeric(hub_area_sqmi), 2)` square miles (`r round(pct_hubs, 1)`% of MSA)
+- **Transit Corridors (1/8 mile buffers)**: `r round(as.numeric(corridor_area_sqmi), 2)` square miles (`r round(pct_corridors, 1)`% of MSA)
+- **Combined Coverage**: `r round(as.numeric(combined_area_sqmi), 2)` square miles (`r round(pct_combined, 1)`% of MSA)
+
+### Transit Infrastructure Summary
+
+**Transit Hubs by Agency:**
+- CTA: `r hub_counts["CTA"]` transit hubs
+- Pace: `r hub_counts["Pace"]` transit hubs  
+- Metra: `r hub_counts["Metra"]` transit hubs
+
+**Qualifying Bus Routes for Corridors:**
+- CTA: `r qualifying_route_counts["cta"]` routes meeting frequency criterion
+- Pace: `r qualifying_route_counts["pace"]` routes meeting frequency criterion
+
+### Methodology Notes
+
+**Frequency Calculation**: This analysis applies the strict interpretation of the legislation's frequency requirements:
+- For **hubs**: ALL routes at a stop must meet the ≤15 minute frequency criterion
+- For **corridors**: At least one route on a street must meet the ≤15 minute frequency criterion
+- Peak hours defined as 7-9 AM and 4-6 PM on weekdays
+- Frequency measured as median headway between consecutive trips
+
+**Geographic Scope**: Analysis limited to Illinois portion of Chicago MSA, consistent with Illinois state legislation.
+
+## Resources and References
+
+-   [People Over Parking Act](https://www.ilga.gov/legislation/104/HB/10400HB3438sam003.htm)
+-   [Chicago Transit Authority GTFS Data](https://www.transitchicago.com/downloads/sch_data/)
+-   [Pace Suburban Bus GTFS Data](https://www.pacebus.com/developer-resources)
+-   [Metra Commuter Rail GTFS Data](https://schedules.metrarail.com/)
+-   [General Transit Feed Specification Reference](https://developers.google.com/transit/gtfs/reference)
+-   [Illinois Homes For All Coalition](https://ilhomesforall.org/)
+-   [Abundant Housing Illinois](https://abundanthousingillinois.org/)
+-   [Parking Reform Network](https://parkingreform.org/)
