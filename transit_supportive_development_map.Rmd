@@ -20,23 +20,28 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 
 On May 28th 2025, an [omnibus bill](https://www.ilga.gov/legislation/104/SB/10400SB2111ham001.htm) was filed in Illinois that would allow transit agencies (Metra, CTA, Pace) to develop land around their train and bus stations.
 
-According to the legislation, "transit-supportive development" is defined as residential, commercial, and governmental facilities and supporting infrastructure improvements that:
+According to the legislation, the bill defines two types of development zones:
 
+**"Transit-supportive development"** - residential, commercial, and governmental facilities and supporting infrastructure improvements that:
 1.  Are designed to facilitate access to and use of public transit or public trails
 2.  Are located within either:
     -   **One-half mile** of a public transportation station, or
     -   **One-eighth mile** of a bus stop on a public transportation bus route
 
+**"Trail-supportive development"** - residential, commercial, and governmental facilities and supporting infrastructure improvements that:
+1.  Are located within **one-quarter mile** of a public trail
+2.  Are designed to facilitate access to and use of public transit or public trails
+
 The Board of Trustees of any Transit District may acquire, construct, own, operate, or maintain transit-supportive development in the metropolitan region and may exercise all powers necessary to accomplish the purposes of this Section.
 
 This analysis visualizes the areas around Chicago that would fall under this authority.
 
-**Note:** at this time, this map does not include 'trail-supportive development', which would allow the agencies to develop land surrounding public trails.
+This analysis now includes both "transit-supportive development" zones around transit stations and "trail-supportive development" zones, which are areas within one-quarter mile of public trails where agencies could also develop land.
 
 ```{r packages}
 # Install packages if not already installed
 required_packages <- c("tidyverse", "sf", "leaflet", "leaflet.extras", 
-                       "data.table", "zip", "httr", "lubridate", "mapview")
+                       "data.table", "zip", "httr", "lubridate", "mapview", "osmdata")
 
 new_packages <- required_packages[!required_packages %in% installed.packages()[,"Package"]]
 if(length(new_packages)) install.packages(new_packages)
@@ -51,6 +56,7 @@ library(zip)
 library(httr)
 library(lubridate)
 library(mapview)
+library(osmdata)
 ```
 
 ```{r download_gtfs, results='hide'}
@@ -250,6 +256,62 @@ bus_stops_sf$agency_name <- factor(
 )
 ```
 
+```{r query_trails}
+## Query OSM for Public Trails
+## According to the legislation, 'trail-supportive development' zones are within 
+## one-quarter mile of public trails
+
+# Define a bounding box for the Chicago metropolitan area
+CHICAGO_METRO_BBOX <- c(-88.5, 41.3, -87.0, 42.2)
+TRAIL_BUFFER_DISTANCE_M <- 402.34  # 1/4 mile in meters
+
+# Query OSM for various types of public trails and paths
+# Focus on designated trail routes to avoid downloading too much data
+
+# Query for designated recreational trails
+recreational_trails_query <- opq(bbox = CHICAGO_METRO_BBOX) %>%
+  add_osm_feature(key = 'route', value = 'hiking') %>%
+  osmdata_sf()
+
+# Query for bicycle routes and multi-use trails
+bike_trails_query <- opq(bbox = CHICAGO_METRO_BBOX) %>%
+  add_osm_feature(key = 'route', value = 'bicycle') %>%
+  osmdata_sf()
+
+# Combine all trail geometries
+trail_lines <- list()
+if (!is.null(recreational_trails_query$osm_lines) && nrow(recreational_trails_query$osm_lines) > 0) {
+  trail_lines <- append(trail_lines, list(recreational_trails_query$osm_lines))
+}
+if (!is.null(bike_trails_query$osm_lines) && nrow(bike_trails_query$osm_lines) > 0) {
+  trail_lines <- append(trail_lines, list(bike_trails_query$osm_lines))
+}
+
+# Create a combined trails dataset if we have data
+if (length(trail_lines) > 0) {
+  # Extract just the geometry to avoid column mismatches
+  combined_trail_geom <- do.call(c, lapply(trail_lines, function(x) st_geometry(x)))
+  
+  # Create a unified trails sf object
+  chicago_trails <- st_sf(
+    name = rep("Public Trail", length(combined_trail_geom)),
+    type = rep("trail", length(combined_trail_geom)),
+    geometry = combined_trail_geom,
+    crs = 4326
+  )
+  
+  message(paste("Found", nrow(chicago_trails), "trail segments"))
+} else {
+  # Create empty sf object if no trails found
+  chicago_trails <- st_sf(
+    name = character(0),
+    type = character(0),
+    geometry = st_sfc(crs = 4326)
+  )
+  message("No trail data found")
+}
+```
+
 ```{r create_buffers}
 ## Create Buffers Around Transportation Stations and Stops
 ## Now we'll create buffers around each transportation station and stop to visualize the areas affected by the legislation.
@@ -265,10 +327,26 @@ half_mile_buffers <- st_buffer(rail_stations_projected, 2640)
 # Create a 1/8 mile buffer (660 feet) around bus stops
 eighth_mile_buffers <- st_buffer(bus_stops_projected, 660)
 
+# Create a 1/4 mile buffer (1320 feet) around trails if we have trail data
+if (nrow(chicago_trails) > 0) {
+  trails_projected <- st_transform(chicago_trails, 3435)
+  quarter_mile_trail_buffers <- st_buffer(trails_projected, 1320)
+  trail_affected_areas <- st_union(quarter_mile_trail_buffers)
+} else {
+  quarter_mile_trail_buffers <- st_sf(geometry = st_sfc(crs = 3435))
+  trail_affected_areas <- st_sf(geometry = st_sfc(crs = 3435))
+}
+
 # Union all buffers to create a single polygon that shows all affected areas
 rail_affected_areas <- st_union(half_mile_buffers)
 bus_affected_areas <- st_union(eighth_mile_buffers)
-all_affected_areas <- st_union(c(rail_affected_areas, bus_affected_areas))
+
+# Combine all development areas (transit + trail)
+if (nrow(chicago_trails) > 0) {
+  all_affected_areas <- st_union(c(rail_affected_areas, bus_affected_areas, trail_affected_areas))
+} else {
+  all_affected_areas <- st_union(c(rail_affected_areas, bus_affected_areas))
+}
 
 # Convert back to WGS84 for mapping
 rail_affected_areas_wgs84 <- st_transform(rail_affected_areas, 4326)
@@ -276,6 +354,14 @@ bus_affected_areas_wgs84 <- st_transform(bus_affected_areas, 4326)
 all_affected_areas_wgs84 <- st_transform(all_affected_areas, 4326)
 half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
 eighth_mile_buffers_wgs84 <- st_transform(eighth_mile_buffers, 4326)
+
+if (nrow(chicago_trails) > 0) {
+  trail_affected_areas_wgs84 <- st_transform(trail_affected_areas, 4326)
+  quarter_mile_trail_buffers_wgs84 <- st_transform(quarter_mile_trail_buffers, 4326)
+} else {
+  trail_affected_areas_wgs84 <- st_sf(geometry = st_sfc(crs = 4326))
+  quarter_mile_trail_buffers_wgs84 <- st_sf(geometry = st_sfc(crs = 4326))
+}
 ```
 
 ## Where would transit agencies have development authority?
@@ -319,6 +405,18 @@ map <- leaflet() %>%
     opacity = 0.7,
     group = "Bus Stop Areas (1/8 Mile)"
   ) %>%
+  # Add 1/4 mile buffers around trails (if available)
+  {if (nrow(chicago_trails) > 0) {
+    addPolygons(.,
+      data = trail_affected_areas_wgs84,
+      fillColor = "orange",
+      fillOpacity = 0.25,
+      weight = 1,
+      color = "orange",
+      opacity = 0.7,
+      group = "Trail Areas (1/4 Mile)"
+    )
+  } else . } %>%
   # Add combined affected areas
   addPolygons(
     data = all_affected_areas_wgs84,
@@ -327,7 +425,7 @@ map <- leaflet() %>%
     weight = 1,
     color = "purple",
     opacity = 0.7,
-    group = "All Affected Areas"
+    group = "All Development Areas"
   ) %>%
   # Add points for rail stations
   addCircleMarkers(
@@ -359,26 +457,45 @@ map <- leaflet() %>%
       "Stop ID: ", stop_id
     )
   ) %>%
+  # Add trail lines (if available)
+  {if (nrow(chicago_trails) > 0) {
+    addPolylines(.,
+      data = chicago_trails,
+      color = "orange",
+      weight = 2,
+      opacity = 0.8,
+      group = "Public Trails",
+      popup = ~paste0(
+        "<strong>", name, "</strong><br>",
+        "Type: Public Trail"
+      )
+    )
+  } else . } %>%
   # Add layer controls
   addLayersControl(
     baseGroups = c("CartoDB Positron"),
     overlayGroups = c(
-      "All Affected Areas",
+      "All Development Areas",
       "Rail Station Areas (1/2 Mile)",
       "Bus Stop Areas (1/8 Mile)",
+      if (nrow(chicago_trails) > 0) "Trail Areas (1/4 Mile)" else NULL,
       "Rail Stations",
-      "Bus Stops (Sample)"
+      "Bus Stops (Sample)",
+      if (nrow(chicago_trails) > 0) "Public Trails" else NULL
     ),
     options = layersControlOptions(collapsed = FALSE)
   ) %>%
   # Add legend
   addLegend(
     position = "bottomright",
-    colors = c("purple", "blue", "green", "#009CDE", "#814C9E", "#E31837"),
+    colors = c("purple", "blue", "green", 
+               if (nrow(chicago_trails) > 0) "orange" else NULL,
+               "#009CDE", "#814C9E", "#E31837"),
     labels = c(
-      "All Transit-Supportive Development Areas", 
+      "All Development Areas", 
       "Rail Station Areas (1/2 Mile)",
       "Bus Stop Areas (1/8 Mile)",
+      if (nrow(chicago_trails) > 0) "Trail Areas (1/4 Mile)" else NULL,
       "CTA", 
       "Pace", 
       "Metra"
@@ -400,7 +517,9 @@ map <- leaflet() %>%
   # Hide some layers by default to avoid overwhelming the map
   hideGroup("Bus Stops (Sample)") %>%
   hideGroup("Rail Station Areas (1/2 Mile)") %>%
-  hideGroup("Bus Stop Areas (1/8 Mile)")
+  hideGroup("Bus Stop Areas (1/8 Mile)") %>%
+  {if (nrow(chicago_trails) > 0) hideGroup(., "Trail Areas (1/4 Mile)") else .} %>%
+  {if (nrow(chicago_trails) > 0) hideGroup(., "Public Trails") else .}
 
 # Display the map
 map
@@ -410,6 +529,13 @@ map
 # Calculate counts by agency
 rail_station_counts <- table(rail_stations_sf$agency_name)
 bus_stop_counts <- table(bus_stops_sf$agency_name)
+
+# Calculate trail counts if available
+if (nrow(chicago_trails) > 0) {
+  trail_count <- nrow(chicago_trails)
+} else {
+  trail_count <- 0
+}
 ```
 
 ### Transit Infrastructure Distribution
@@ -422,6 +548,7 @@ The analysis includes:
 -   **Bus Stops**: `r sum(bus_stop_counts)` total
     -   CTA: `r bus_stop_counts["CTA"]` stops
     -   Pace: `r bus_stop_counts["Pace"]` stops
+-   **Public Trails**: `r if(trail_count > 0) paste(trail_count, "trail segments") else "No trail data available"`
 
 #### The Value-Capture Model
 
@@ -433,15 +560,17 @@ Instead of relying solely on fares and government subsidies, transit agencies de
 
 The Local Mass Transit District Act amendment would give CTA, Metra, and Pace similar development powers. Instead of watching private developers capture transit-created value while agencies struggle with funding, Chicago's transit systems could develop their own parking lots and station areas into mixed-use projects that generate ongoing revenue to improve service.
 
-The transit-supportive development authority granted by this legislation could have significant implications for development in the Chicago region:
+The transit-supportive and trail-supportive development authority granted by this legislation could have significant implications for development in the Chicago region:
 
 1.  **Increased Transit-Oriented Development**: Transit agencies would have the authority to develop land around their stations and stops, potentially leading to more housing, commercial, and mixed-use development near transit.
 
-2.  **Expanded Housing Options**: Development near transit could increase housing supply and potentially improve affordability in transit-accessible areas.
+2.  **Trail-Adjacent Development**: The legislation also enables development within 1/4 mile of public trails, creating opportunities for trail-oriented communities that combine recreation access with transit connectivity.
 
-3.  **Reduced Car Dependency**: More development near transit could reduce car dependency and increase transit ridership.
+3.  **Expanded Housing Options**: Development near transit and trails could increase housing supply and potentially improve affordability in both transit-accessible and recreation-accessible areas.
 
-4.  **Economic Development**: Transit-supportive development could stimulate economic development in areas around transit stations and stops.
+4.  **Reduced Car Dependency**: More development near transit and trails could reduce car dependency, increase transit ridership, and promote active transportation.
+
+5.  **Economic Development**: Transit-supportive and trail-supportive development could stimulate economic development in areas around both transit infrastructure and recreational amenities.
 
 ## Resources and References
 
