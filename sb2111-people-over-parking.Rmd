@@ -12,6 +12,13 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+Sys.setenv(
+  OMP_NUM_THREADS = "1",
+  OMP_THREAD_LIMIT = "1",
+  OPENBLAS_NUM_THREADS = "1",
+  MKL_NUM_THREADS = "1",
+  NUMEXPR_NUM_THREADS = "1"
+)
 ```
 
 ### What Are Parking Mandates?
@@ -56,6 +63,8 @@ library(lubridate)
 library(mapview)
 library(tigris) # Added for street network data
 
+options(tigris_use_cache = TRUE)
+
 # Disable s2 processing to avoid geometry validation issues
 sf_use_s2(FALSE)
 ```
@@ -80,32 +89,38 @@ download_and_extract_gtfs <- function(agency_name, zip_link) {
     dir.create(cache_dir)
   }
   cache_file <- file.path(cache_dir, paste0(agency_name, "_gtfs.zip"))
+  force_download <- identical(Sys.getenv("FORCE_GTFS_DOWNLOAD"), "1")
   
-  tryCatch({
-    options(timeout = 60)
-    
-    response <- httr::GET(
-      zip_link,
-      httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-      httr::write_disk(temp_file, overwrite = TRUE),
-      httr::timeout(60)
-    )
-    
-    if (httr::status_code(response) != 200) {
-      stop(paste0("Failed to download with status code: ", httr::status_code(response)))
-    }
-    
-    file.copy(temp_file, cache_file, overwrite = TRUE)
-    
-  }, error = function(e) {
-    message(paste0("Download failed for ", agency_name, ": ", e$message))
-    if (file.exists(cache_file)) {
-      message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
-      file.copy(cache_file, temp_file, overwrite = TRUE)
-    } else {
-      stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
-    }
-  })
+  if (file.exists(cache_file) && !force_download) {
+    message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+    file.copy(cache_file, temp_file, overwrite = TRUE)
+  } else {
+    tryCatch({
+      options(timeout = 60)
+      
+      response <- httr::GET(
+        zip_link,
+        httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+        httr::write_disk(temp_file, overwrite = TRUE),
+        httr::timeout(60)
+      )
+      
+      if (httr::status_code(response) != 200) {
+        stop(paste0("Failed to download with status code: ", httr::status_code(response)))
+      }
+      
+      file.copy(temp_file, cache_file, overwrite = TRUE)
+      
+    }, error = function(e) {
+      message(paste0("Download failed for ", agency_name, ": ", e$message))
+      if (file.exists(cache_file)) {
+        message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+        file.copy(cache_file, temp_file, overwrite = TRUE)
+      } else {
+        stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
+      }
+    })
+  }
   
   gtfs_files <- unzip(temp_file, exdir = temp_dir)
   return(temp_dir)
@@ -192,6 +207,10 @@ read_normalize_gtfs <- function(agency_name, agency_dir) {
     stop_times[, stop_id := as.character(stop_id)]
     stop_times[, unique_trip_id := paste0(agency_name, "_", trip_id)]
     stop_times[, unique_stop_id := paste0(agency_name, "_", stop_id)]
+    # Convert stop_sequence to integer to avoid integer64 issues
+    if ("stop_sequence" %in% names(stop_times)) {
+      stop_times[, stop_sequence := as.integer(stop_sequence)]
+    }
   } else {
     stop_times <- data.table(
       trip_id = character(),
@@ -210,6 +229,13 @@ read_normalize_gtfs <- function(agency_name, agency_dir) {
   if (file.exists(calendar_file)) {
     calendar <- fread(calendar_file)
     calendar[, agency := agency_name]
+    # Convert date columns to character to avoid integer64 issues
+    if ("start_date" %in% names(calendar)) {
+      calendar[, start_date := as.character(start_date)]
+    }
+    if ("end_date" %in% names(calendar)) {
+      calendar[, end_date := as.character(end_date)]
+    }
   } else {
     calendar <- data.table(
       service_id = character(),
@@ -220,8 +246,8 @@ read_normalize_gtfs <- function(agency_name, agency_dir) {
       friday = integer(),
       saturday = integer(),
       sunday = integer(),
-      start_date = integer(),
-      end_date = integer(),
+      start_date = character(),
+      end_date = character(),
       agency = character()
     )
   }
@@ -239,22 +265,148 @@ read_normalize_gtfs <- function(agency_name, agency_dir) {
 ```{r download_gtfs, results='hide'}
 ## Download and Process GTFS Data for Hubs
 
-# Download and extract GTFS data for all three agencies
-cta_dir <- download_and_extract_gtfs("cta", "[https://www.transitchicago.com/downloads/sch_data/google_transit.zip](https://www.transitchicago.com/downloads/sch_data/google_transit.zip)")
-pace_dir <- download_and_extract_gtfs("pace", "[https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip](https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip)")
-metra_dir <- download_and_extract_gtfs("metra", "[https://schedules.metrarail.com/gtfs/schedule.zip](https://schedules.metrarail.com/gtfs/schedule.zip)")
+# Download and extract GTFS data for all agencies (Chicago + St. Louis + Champaign-Urbana)
+cta_dir <- download_and_extract_gtfs("cta", "https://www.transitchicago.com/downloads/sch_data/google_transit.zip")
+pace_dir <- download_and_extract_gtfs("pace", "https://www.pacebus.com/sites/default/files/2025-02/GTFS.zip")
+metra_dir <- download_and_extract_gtfs("metra", "https://schedules.metrarail.com/gtfs/schedule.zip")
+metro_stl_dir <- download_and_extract_gtfs("metro_stl", "https://metrostlouis.org/Transit/google_transit.zip")
+cumtd_dir <- download_and_extract_gtfs("cumtd", "http://developer.cumtd.com/gtfs/google_transit.zip")
 
-# Read and normalize GTFS data for all three agencies
+# Read and normalize GTFS data for all agencies
 cta_data <- read_normalize_gtfs("cta", cta_dir)
 pace_data <- read_normalize_gtfs("pace", pace_dir)
 metra_data <- read_normalize_gtfs("metra", metra_dir)
+metro_stl_data <- read_normalize_gtfs("metro_stl", metro_stl_dir)
+cumtd_data <- read_normalize_gtfs("cumtd", cumtd_dir)
 
 # Combine data from all agencies
-all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops), fill = TRUE)
-all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes), fill = TRUE)
-all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips), fill = TRUE)
-all_stop_times <- rbindlist(list(cta_data$stop_times, pace_data$stop_times, metra_data$stop_times), fill = TRUE)
-all_calendar <- rbindlist(list(cta_data$calendar, pace_data$calendar, metra_data$calendar), fill = TRUE)
+# Function to convert all integer64 columns to regular integer/character
+convert_integer64 <- function(dt) {
+  for (col in names(dt)) {
+    if (class(dt[[col]])[1] == "integer64") {
+      # Convert to character for large integers (like dates), regular integer for small ones
+      max_val <- max(dt[[col]], na.rm = TRUE)
+      if (!is.na(max_val) && max_val > .Machine$integer.max) {
+        dt[, (col) := as.character(get(col))]
+      } else {
+        dt[, (col) := as.integer(get(col))]
+      }
+    }
+  }
+  return(dt)
+}
+
+# Apply conversion to all datasets and preserve modifications
+gtfs_datasets <- list(
+  cta = cta_data,
+  pace = pace_data,
+  metra = metra_data,
+  metro_stl = metro_stl_data,
+  cumtd = cumtd_data
+)
+
+gtfs_datasets <- lapply(gtfs_datasets, function(data) {
+  data$stops <- convert_integer64(data$stops)
+  data$routes <- convert_integer64(data$routes)
+  data$trips <- convert_integer64(data$trips)
+  data$stop_times <- convert_integer64(data$stop_times)
+  if ("stop_sequence" %in% names(data$stop_times)) {
+    data$stop_times[, stop_sequence := as.integer(stop_sequence)]
+  }
+  data$calendar <- convert_integer64(data$calendar)
+  data
+})
+
+cta_data <- gtfs_datasets$cta
+pace_data <- gtfs_datasets$pace
+metra_data <- gtfs_datasets$metra
+metro_stl_data <- gtfs_datasets$metro_stl
+cumtd_data <- gtfs_datasets$cumtd
+
+all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops, metro_stl_data$stops, cumtd_data$stops), fill = TRUE, use.names = TRUE)
+all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes, metro_stl_data$routes, cumtd_data$routes), fill = TRUE, use.names = TRUE)
+all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips, metro_stl_data$trips, cumtd_data$trips), fill = TRUE, use.names = TRUE)
+all_stop_times <- rbindlist(list(cta_data$stop_times, pace_data$stop_times, metra_data$stop_times, metro_stl_data$stop_times, cumtd_data$stop_times), fill = TRUE, use.names = TRUE)
+
+if ("stop_sequence" %in% names(all_stop_times)) {
+  all_stop_times[, stop_sequence := as.integer(stop_sequence)]
+}
+
+# For calendar, ensure consistent column order and types before combining
+standard_calendar_cols <- c("service_id", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "start_date", "end_date", "agency")
+
+for (data in list(cta_data, pace_data, metra_data, metro_stl_data, cumtd_data)) {
+  # Convert date columns to character to avoid integer64 issues
+  if ("start_date" %in% names(data$calendar)) {
+    data$calendar[, start_date := as.character(start_date)]
+  }
+  if ("end_date" %in% names(data$calendar)) {
+    data$calendar[, end_date := as.character(end_date)]
+  }
+
+  # Ensure all expected columns exist
+  for (col in standard_calendar_cols) {
+    if (!col %in% names(data$calendar)) {
+      if (col %in% c("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")) {
+        data$calendar[, (col) := as.integer(NA)]
+      } else if (col %in% c("start_date", "end_date", "service_id", "agency")) {
+        data$calendar[, (col) := as.character(NA)]
+      }
+    }
+  }
+
+  # Reorder columns to standard order
+  existing_cols <- intersect(standard_calendar_cols, names(data$calendar))
+  setcolorder(data$calendar, existing_cols)
+}
+
+all_calendar <- rbindlist(list(cta_data$calendar, pace_data$calendar, metra_data$calendar, metro_stl_data$calendar, cumtd_data$calendar), fill = TRUE, use.names = TRUE)
+
+# Load Illinois boundary and helper clipping utilities
+illinois_boundary <- states(cb = TRUE, year = 2023) %>%
+  dplyr::filter(STUSPS == "IL") %>%
+  st_transform(4326)
+illinois_boundary_geom <- st_geometry(illinois_boundary)
+
+clip_sfc_to_il <- function(geom) {
+  if (is.null(geom) || length(geom) == 0) {
+    return(geom)
+  }
+  if (all(st_is_empty(geom))) {
+    return(geom)
+  }
+  st_intersection(geom, illinois_boundary_geom)
+}
+
+clip_sf_to_il <- function(sf_obj) {
+  if (is.null(sf_obj) || nrow(sf_obj) == 0) {
+    return(sf_obj)
+  }
+  clipped_geom <- clip_sfc_to_il(st_geometry(sf_obj))
+  st_geometry(sf_obj) <- clipped_geom
+  sf_obj <- sf_obj[!st_is_empty(sf_obj), ]
+  sf_obj
+}
+
+# Restrict analysis to stops within Illinois
+all_stops_sf <- st_as_sf(all_stops, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
+within_il <- lengths(st_within(all_stops_sf, illinois_boundary_geom)) > 0
+all_stops_sf <- all_stops_sf[within_il, ]
+all_stops <- as.data.table(st_drop_geometry(all_stops_sf))
+
+illinois_stop_ids <- unique(all_stops$unique_stop_id)
+all_stop_times <- all_stop_times[unique_stop_id %in% illinois_stop_ids]
+
+illinois_trip_ids <- unique(all_stop_times$unique_trip_id)
+all_trips <- all_trips[unique_trip_id %in% illinois_trip_ids]
+
+illinois_route_ids <- unique(all_trips$unique_route_id)
+all_routes <- all_routes[unique_route_id %in% illinois_route_ids]
+
+illinois_service_ids <- unique(all_trips$service_id)
+if ("service_id" %in% names(all_calendar)) {
+  all_calendar <- all_calendar[service_id %in% illinois_service_ids]
+}
 
 # Clean up stop times that are > 24:00:00
 all_stop_times[, arrival_time := fifelse(substr(arrival_time, 1, 2) >= "24", 
@@ -280,12 +432,14 @@ all_stop_times <- merge(
 # Check if direction_id exists in trips data
 cat("=== Checking direction_id availability ===\n\n")
 
-agencies <- c("cta", "pace", "metra")
+agencies <- c("cta", "pace", "metra", "metro_stl", "cumtd")
 for (agency in agencies) {
   trips_data <- switch(agency,
                       "cta" = cta_data$trips,
                       "pace" = pace_data$trips,
-                      "metra" = metra_data$trips)
+                      "metra" = metra_data$trips,
+                      "metro_stl" = metro_stl_data$trips,
+                      "cumtd" = cumtd_data$trips)
 
   if ("direction_id" %in% names(trips_data)) {
     cat(sprintf("%s: Has direction_id field\n", toupper(agency)))
@@ -302,17 +456,19 @@ for (agency in agencies) {
 # If direction_id exists, add it to all_trips
 if ("direction_id" %in% names(cta_data$trips) |
     "direction_id" %in% names(pace_data$trips) |
-    "direction_id" %in% names(metra_data$trips)) {
+    "direction_id" %in% names(metra_data$trips) |
+    "direction_id" %in% names(metro_stl_data$trips) |
+    "direction_id" %in% names(cumtd_data$trips)) {
 
   # Ensure direction_id exists in all datasets (add NA if missing)
-  for (data in list(cta_data, pace_data, metra_data)) {
+  for (data in list(cta_data, pace_data, metra_data, metro_stl_data, cumtd_data)) {
     if (!"direction_id" %in% names(data$trips)) {
       data$trips[, direction_id := NA_integer_]
     }
   }
 
   # Rebuild all_trips with direction_id
-  all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips), fill = TRUE)
+  all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips, metro_stl_data$trips, cumtd_data$trips), fill = TRUE)
 
   cat("direction_id added to all_trips\n")
   cat(sprintf("Trips with direction_id: %d / %d (%.1f%%)\n",
@@ -496,8 +652,23 @@ metra_rail_stops <- all_stops[
   agency == "metra" & stop_lat <= 42.5,
   .(unique_stop_id = unique_stop_id, stop_id = stop_id, stop_name = stop_name, stop_lat = stop_lat, stop_lon = stop_lon, agency = agency)]
 
+# For Metro St. Louis, identify MetroLink stations (route_type=2)
+# MetroLink serves both Missouri and Illinois (including East St. Louis)
+# Get MetroLink route IDs
+metro_stl_rail_route_ids <- all_routes[agency == "metro_stl" & route_type == 2, unique_route_id]
+
+# Get stops served by MetroLink routes
+metro_stl_rail_stop_ids <- all_stop_times[
+  agency == "metro_stl" & unique_route_id %in% metro_stl_rail_route_ids,
+  unique(unique_stop_id)
+]
+
+metro_stl_rail_stops <- all_stops[
+  agency == "metro_stl" & unique_stop_id %in% metro_stl_rail_stop_ids,
+  .(unique_stop_id = unique_stop_id, stop_id = stop_id, stop_name = stop_name, stop_lat = stop_lat, stop_lon = stop_lon, agency = agency)]
+
 # Combine all rail stations
-rail_stops <- unique(rbindlist(list(cta_rail_stops_parents, cta_rail_stations, metra_rail_stops), fill = TRUE))
+rail_stops <- unique(rbindlist(list(cta_rail_stops_parents, cta_rail_stations, metra_rail_stops, metro_stl_rail_stops), fill = TRUE))
 rail_stops[, type := "rail"]
 
 
@@ -840,8 +1011,8 @@ all_hubs_sf <- st_as_sf(all_hubs, coords = c("stop_lon", "stop_lat"), crs = 4326
 # Add agency information
 all_hubs_sf$agency_name <- factor(
   all_hubs_sf$agency,
-  levels = c("cta", "pace", "metra"),
-  labels = c("CTA", "Pace", "Metra")
+  levels = c("cta", "pace", "metra", "metro_stl", "cumtd"),
+  labels = c("CTA", "Pace", "Metra", "Metro STL", "MTD")
 )
 ```
 
@@ -908,10 +1079,14 @@ qualifying_corridor_stops_sf <- st_as_sf(
   crs = 4326
 )
 
-# 6. Get Street Network Data (TIGRIS) for 6-county area
-# IL Counties: Cook (031), DuPage (043), Kane (089), Lake (097), McHenry (111), Will (197)
+# 6. Get Street Network Data (TIGRIS) for Illinois counties
+# Chicago area - 6 counties: Cook (031), DuPage (043), Kane (089), Lake (097), McHenry (111), Will (197)
+# St. Louis area - IL counties: St. Clair (163), Madison (119), Monroe (133)
+# Champaign-Urbana area: Champaign County (019)
 # Using FIPS codes instead of names to avoid "Invalid county" error
-counties_fips <- c("031", "043", "089", "097", "111", "197")
+counties_fips <- c("031", "043", "089", "097", "111", "197",  # Chicago metro
+                   "163", "119", "133",                        # St. Louis metro (IL side)
+                   "019")                                      # Champaign-Urbana
 
 # Download roads for all counties and combine
 all_streets_sf <- rbindlist(lapply(counties_fips, function(co) {
@@ -949,20 +1124,32 @@ all_hub_areas <- st_union(half_mile_buffers)
 
 # Corridors
 all_corridors_union_wgs84 <- st_transform(all_corridors_union, 4326)
+all_corridors_union_wgs84 <- clip_sfc_to_il(all_corridors_union_wgs84)
 
 # Hubs
 all_hub_areas_wgs84 <- st_transform(all_hub_areas, 4326)
+all_hub_areas_wgs84 <- clip_sfc_to_il(all_hub_areas_wgs84)
 half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
+half_mile_buffers_wgs84 <- clip_sf_to_il(half_mile_buffers_wgs84)
 
 # Separate hub buffers by agency
 cta_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "cta", ]
 pace_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "pace", ]
 metra_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "metra", ]
+metro_stl_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "metro_stl", ]
+cumtd_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "cumtd", ]
 
 # Union hub buffers by agency
 cta_hubs_union <- if(nrow(cta_hub_buffers) > 0) st_union(cta_hub_buffers) else st_sfc(crs = 4326)
 pace_hubs_union <- if(nrow(pace_hub_buffers) > 0) st_union(pace_hub_buffers) else st_sfc(crs = 4326)
 metra_hubs_union <- if(nrow(metra_hub_buffers) > 0) st_union(metra_hub_buffers) else st_sfc(crs = 4326)
+metro_stl_hubs_union <- if(nrow(metro_stl_hub_buffers) > 0) st_union(metro_stl_hub_buffers) else st_sfc(crs = 4326)
+cumtd_hubs_union <- if(nrow(cumtd_hub_buffers) > 0) st_union(cumtd_hub_buffers) else st_sfc(crs = 4326)
+cta_hubs_union <- clip_sfc_to_il(cta_hubs_union)
+pace_hubs_union <- clip_sfc_to_il(pace_hubs_union)
+metra_hubs_union <- clip_sfc_to_il(metra_hubs_union)
+metro_stl_hubs_union <- clip_sfc_to_il(metro_stl_hubs_union)
+cumtd_hubs_union <- clip_sfc_to_il(cumtd_hubs_union)
 
 # Separate corridor buffers by agency (approximate)
 # This is more complex, as a street can be served by multiple agencies.
@@ -972,6 +1159,7 @@ metra_hubs_union <- if(nrow(metra_hub_buffers) > 0) st_union(metra_hub_buffers) 
 
 # Combine all affected areas (hubs + corridors)
 all_affected_areas_combined <- st_union(c(all_hub_areas_wgs84, all_corridors_union_wgs84))
+all_affected_areas_combined <- clip_sfc_to_il(all_affected_areas_combined)
 ```
 
 ```{r calculate_areas}
@@ -987,14 +1175,19 @@ corridor_area_sqmi <- units::set_units(corridor_area_sqft, "mi^2")
 combined_area_sqft <- st_area(all_affected_areas_combined)
 combined_area_sqmi <- units::set_units(combined_area_sqft, "mi^2")
 
-# Total area of the Illinois portion of the Chicago MSA (6 counties)
-# Cook: 953.6, DuPage: 336.5, Kane: 524.2, Lake: 470, McHenry: 611, Will: 849.2
-chicago_il_msa_area_sqmi <- 953.6 + 336.5 + 524.2 + 470 + 611 + 849.2 
+# Total area covered by analysis
+# Chicago MSA (6 IL counties): Cook: 953.6, DuPage: 336.5, Kane: 524.2, Lake: 470, McHenry: 611, Will: 849.2
+# St. Louis MSA (3 IL counties): St. Clair: 674.6, Madison: 741.5, Monroe: 398.2
+# Champaign-Urbana: Champaign County: 1,008
+chicago_il_msa_area_sqmi <- 953.6 + 336.5 + 524.2 + 470 + 611 + 849.2
+stlouis_il_msa_area_sqmi <- 674.6 + 741.5 + 398.2
+champaign_area_sqmi <- 1008
+total_il_area_sqmi <- chicago_il_msa_area_sqmi + stlouis_il_msa_area_sqmi + champaign_area_sqmi
 
-# Calculate percentages
-pct_hubs <- as.numeric(hub_area_sqmi) / chicago_il_msa_area_sqmi * 100
-pct_corridors <- as.numeric(corridor_area_sqmi) / chicago_il_msa_area_sqmi * 100
-pct_combined <- as.numeric(combined_area_sqmi) / chicago_il_msa_area_sqmi * 100
+# Calculate percentages (against total IL area covered)
+pct_hubs <- as.numeric(hub_area_sqmi) / total_il_area_sqmi * 100
+pct_corridors <- as.numeric(corridor_area_sqmi) / total_il_area_sqmi * 100
+pct_combined <- as.numeric(combined_area_sqmi) / total_il_area_sqmi * 100
 
 # Count hubs and routes
 hub_counts <- table(all_hubs_sf$agency_name)
@@ -1006,14 +1199,16 @@ qualifying_corridor_stop_count <- nrow(qualifying_corridor_stops_sf)
 ```{r create_map}
 # Define color palettes
 agency_pal <- colorFactor(
-  palette = c("#009CDE", "#814C9E", "#E31837"),  # CTA blue, Pace purple, Metra red
+  palette = c("#009CDE", "#814C9E", "#E31837", "#00A651", "#FF6600"),  # CTA blue, Pace purple, Metra red, Metro STL green, MTD orange
   domain = all_hubs_sf$agency_name
 )
 
+il_bbox <- st_bbox(illinois_boundary)
+
 # Create the interactive map
 map <- leaflet() %>%
-  setView(lng = -87.6079, lat = 41.8917, zoom = 9) %>%
   addProviderTiles(providers$CartoDB.Positron) %>%
+  fitBounds(il_bbox["xmin"], il_bbox["ymin"], il_bbox["xmax"], il_bbox["ymax"]) %>%
   
   # Combined affected areas (default visible)
   addPolygons(
@@ -1054,7 +1249,25 @@ map <- leaflet() %>%
     opacity = 0.8,
     group = "Metra Hubs (1/2 mile)"
   ) %>%
-  
+  addPolygons(
+    data = metro_stl_hubs_union,
+    fillColor = "#00A651",
+    fillOpacity = 0.4,
+    weight = 1,
+    color = "#00A651",
+    opacity = 0.8,
+    group = "Metro STL Hubs (1/2 mile)"
+  ) %>%
+  addPolygons(
+    data = cumtd_hubs_union,
+    fillColor = "#FF6600",
+    fillOpacity = 0.4,
+    weight = 1,
+    color = "#FF6600",
+    opacity = 0.8,
+    group = "MTD Hubs (1/2 mile)"
+  ) %>%
+
   # Corridor areas (combined)
   addPolygons(
     data = all_corridors_union_wgs84,
@@ -1114,19 +1327,23 @@ map <- leaflet() %>%
     overlayGroups = c(
       "All Affected Areas (Hubs + Corridors)",
       "CTA Hubs (1/2 mile)",
-      "Pace Hubs (1/2 mile)", 
+      "Pace Hubs (1/2 mile)",
       "Metra Hubs (1/2 mile)",
+      "Metro STL Hubs (1/2 mile)",
+      "MTD Hubs (1/2 mile)",
       "All Corridors (1/8 mile)",
       "Transit Hub Points"
     ),
     options = layersControlOptions(collapsed = FALSE)
   ) %>%
-  
+
   # Hide individual layers by default, show only combined
   hideGroup(c(
     "CTA Hubs (1/2 mile)",
-    "Pace Hubs (1/2 mile)", 
+    "Pace Hubs (1/2 mile)",
     "Metra Hubs (1/2 mile)",
+    "Metro STL Hubs (1/2 mile)",
+    "MTD Hubs (1/2 mile)",
     "All Corridors (1/8 mile)",
     "Transit Hub Points"
   )) %>%
@@ -1134,11 +1351,13 @@ map <- leaflet() %>%
   # Add legend
   addLegend(
     position = "bottomright",
-    colors = c("purple", "#009CDE", "#814C9E", "#E31837", "#FF8C00"),
-    labels = c("All Affected Areas", 
-               "CTA Hubs", 
-               "Pace Hubs", 
+    colors = c("purple", "#009CDE", "#814C9E", "#E31837", "#00A651", "#FF6600", "#FF8C00"),
+    labels = c("All Affected Areas",
+               "CTA Hubs",
+               "Pace Hubs",
                "Metra Hubs",
+               "Metro STL Hubs",
+               "MTD Hubs",
                "All Corridors (dashed)"),
     opacity = 0.7
   ) %>%
@@ -1202,7 +1421,7 @@ This analysis implements the following methodology to identify qualifying transi
 
 - **Bus Hubs**: Must have **2 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period AND **routes must overlap on same street/intersection**
 - **Bus Corridors**: Must have **1 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period
-- **Rail Hubs**: All CTA rail stations and Metra stations within Illinois automatically qualify
+- **Rail Hubs**: All rail stations within Illinois automatically qualify (CTA rail, Metra, and Metro St. Louis MetroLink)
 
 **Direction Handling:**
 
@@ -1211,9 +1430,14 @@ This analysis implements the following methodology to identify qualifying transi
 
 **Data Sources:**
 
-- CTA, Pace, and Metra GTFS (General Transit Feed Specification) data
+- Chicago area: CTA, Pace, and Metra GTFS (General Transit Feed Specification) data
+- St. Louis area: Metro St. Louis GTFS data (includes MetroLink and MetroBus)
+- Champaign-Urbana: CUMTD (Champaign-Urbana Mass Transit District) GTFS data
 - TIGER/Line street network data from U.S. Census Bureau via tigris package
-- Analysis covers 6 Illinois counties: Cook, DuPage, Kane, Lake, McHenry, and Will
+- Analysis covers 10 Illinois counties:
+  - Chicago metro: Cook, DuPage, Kane, Lake, McHenry, and Will
+  - St. Louis metro: St. Clair, Madison, and Monroe
+  - Champaign-Urbana: Champaign
 
 
 
@@ -1246,8 +1470,15 @@ total_hubs <- nrow(all_hubs_sf)
 # Extract agency-specific stats
 cta_hub <- bus_hub_summary[agency == "cta"]
 pace_hub <- bus_hub_summary[agency == "pace"]
+metro_stl_hub <- bus_hub_summary[agency == "metro_stl"]
+cumtd_hub <- bus_hub_summary[agency == "cumtd"]
 cta_corridor <- corridor_summary[agency == "cta"]
 pace_corridor <- corridor_summary[agency == "pace"]
+metro_stl_corridor <- corridor_summary[agency == "metro_stl"]
+cumtd_corridor <- corridor_summary[agency == "cumtd"]
+
+# Count rail hubs by agency
+rail_hub_counts <- table(rail_stops$agency)
 ```
 
 ## Summary Statistics
@@ -1268,7 +1499,22 @@ pace_corridor <- corridor_summary[agency == "pace"]
 - Average routes per cluster: **`r sprintf("%.1f", pace_hub$avg_routes_am)` (AM)** / **`r sprintf("%.1f", pace_hub$avg_routes_pm)` (PM)**
 - Average service interval: **`r sprintf("%.1f", pace_hub$avg_interval_am)` min (AM)** / **`r sprintf("%.1f", pace_hub$avg_interval_pm)` min (PM)**
 
+**Metro St. Louis:**
+
+- Bus hub stops: **`r if(nrow(metro_stl_hub) > 0) metro_stl_hub$total_stops else 0`** (in `r if(nrow(metro_stl_hub) > 0) metro_stl_hub$unique_clusters else 0` clusters)
+- Average routes per cluster: **`r if(nrow(metro_stl_hub) > 0) sprintf("%.1f", metro_stl_hub$avg_routes_am) else "N/A"` (AM)** / **`r if(nrow(metro_stl_hub) > 0) sprintf("%.1f", metro_stl_hub$avg_routes_pm) else "N/A"` (PM)**
+- Average service interval: **`r if(nrow(metro_stl_hub) > 0) sprintf("%.1f", metro_stl_hub$avg_interval_am) else "N/A"` min (AM)** / **`r if(nrow(metro_stl_hub) > 0) sprintf("%.1f", metro_stl_hub$avg_interval_pm) else "N/A"` min (PM)**
+
+**Champaign-Urbana MTD:**
+
+- Bus hub stops: **`r if(nrow(cumtd_hub) > 0) cumtd_hub$total_stops else 0`** (in `r if(nrow(cumtd_hub) > 0) cumtd_hub$unique_clusters else 0` clusters)
+- Average routes per cluster: **`r if(nrow(cumtd_hub) > 0) sprintf("%.1f", cumtd_hub$avg_routes_am) else "N/A"` (AM)** / **`r if(nrow(cumtd_hub) > 0) sprintf("%.1f", cumtd_hub$avg_routes_pm) else "N/A"` (PM)**
+- Average service interval: **`r if(nrow(cumtd_hub) > 0) sprintf("%.1f", cumtd_hub$avg_interval_am) else "N/A"` min (AM)** / **`r if(nrow(cumtd_hub) > 0) sprintf("%.1f", cumtd_hub$avg_interval_pm) else "N/A"` min (PM)**
+
 **Rail Stations:** `r rail_hub_count`
+- CTA: `r if("cta" %in% names(rail_hub_counts)) rail_hub_counts["cta"] else 0`
+- Metra: `r if("metra" %in% names(rail_hub_counts)) rail_hub_counts["metra"] else 0`
+- Metro STL: `r if("metro_stl" %in% names(rail_hub_counts)) rail_hub_counts["metro_stl"] else 0`
 
 **Total Transit Hubs:** `r formatC(total_hubs, format="d", big.mark=",")`
 
@@ -1288,12 +1534,28 @@ pace_corridor <- corridor_summary[agency == "pace"]
 - Average routes per stop: **`r sprintf("%.1f", pace_corridor$avg_routes_am)` (AM)** / **`r sprintf("%.1f", pace_corridor$avg_routes_pm)` (PM)**
 - Average service interval: **`r sprintf("%.1f", pace_corridor$avg_interval_am)` min (AM)** / **`r sprintf("%.1f", pace_corridor$avg_interval_pm)` min (PM)**
 
+**Metro St. Louis:**
+
+- Corridor stops: **`r if(nrow(metro_stl_corridor) > 0) formatC(metro_stl_corridor$total_stops, format="d", big.mark=",") else "0"`**
+- Average routes per stop: **`r if(nrow(metro_stl_corridor) > 0) sprintf("%.1f", metro_stl_corridor$avg_routes_am) else "N/A"` (AM)** / **`r if(nrow(metro_stl_corridor) > 0) sprintf("%.1f", metro_stl_corridor$avg_routes_pm) else "N/A"` (PM)**
+- Average service interval: **`r if(nrow(metro_stl_corridor) > 0) sprintf("%.1f", metro_stl_corridor$avg_interval_am) else "N/A"` min (AM)** / **`r if(nrow(metro_stl_corridor) > 0) sprintf("%.1f", metro_stl_corridor$avg_interval_pm) else "N/A"` min (PM)**
+
+**Champaign-Urbana MTD:**
+
+- Corridor stops: **`r if(nrow(cumtd_corridor) > 0) formatC(cumtd_corridor$total_stops, format="d", big.mark=",") else "0"`**
+- Average routes per stop: **`r if(nrow(cumtd_corridor) > 0) sprintf("%.1f", cumtd_corridor$avg_routes_am) else "N/A"` (AM)** / **`r if(nrow(cumtd_corridor) > 0) sprintf("%.1f", cumtd_corridor$avg_routes_pm) else "N/A"` (PM)**
+- Average service interval: **`r if(nrow(cumtd_corridor) > 0) sprintf("%.1f", cumtd_corridor$avg_interval_am) else "N/A"` min (AM)** / **`r if(nrow(cumtd_corridor) > 0) sprintf("%.1f", cumtd_corridor$avg_interval_pm) else "N/A"` min (PM)**
+
 ### Geographic Coverage
 
-- **Hub buffer area (1/2 mile):** `r sprintf("%.1f", as.numeric(hub_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_hubs)` of 6-county area)
-- **Corridor buffer area (1/8 mile):** `r sprintf("%.1f", as.numeric(corridor_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_corridors)` of 6-county area)
-- **Combined affected area:** `r sprintf("%.1f", as.numeric(combined_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_combined)` of 6-county area)
-- **Chicago IL MSA (6 counties):** `r sprintf("%.1f", chicago_il_msa_area_sqmi)` sq mi
+- **Hub buffer area (1/2 mile):** `r sprintf("%.1f", as.numeric(hub_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_hubs)` of total area)
+- **Corridor buffer area (1/8 mile):** `r sprintf("%.1f", as.numeric(corridor_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_corridors)` of total area)
+- **Combined affected area:** `r sprintf("%.1f", as.numeric(combined_area_sqmi))` sq mi (`r sprintf("%.2f%%", pct_combined)` of total area)
+- **Total Illinois area analyzed:**
+  - Chicago MSA (6 counties): `r sprintf("%.1f", chicago_il_msa_area_sqmi)` sq mi
+  - St. Louis MSA (3 IL counties): `r sprintf("%.1f", stlouis_il_msa_area_sqmi)` sq mi
+  - Champaign-Urbana (1 county): `r sprintf("%.1f", champaign_area_sqmi)` sq mi
+  - **Total: `r sprintf("%.1f", total_il_area_sqmi)` sq mi**
 
 ## Notes on Updated Methodology
 
