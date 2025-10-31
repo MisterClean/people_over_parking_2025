@@ -15,7 +15,7 @@ output:
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
 
-### Understanding Parking Mandates
+### What Are Parking Mandates?
 
 Parking mandates, also known as parking minimums, are zoning regulations that require developers to build a minimum number of parking spaces with new housing and commercial developments. These mandates typically specify a certain number of parking spaces per unit of housing, square footage of retail space, or other metrics depending on the development type.
 
@@ -36,65 +36,6 @@ Parking mandates, also known as parking minimums, are zoning regulations that re
 -   **Vibrant Communities**: Space previously dedicated to parking can be repurposed for housing, businesses, and community amenities.
 
 ### Enter: The People Over Parking Act
-
-This analysis examines the potential impact of new legislation passed in Illinois (SB2111) on Chicagoland.
-
-According to the updated bill [10400SB2111ham003](https://www.ilga.gov/documents/legislation/104/SB/PDF/10400SB2111ham003.pdf), minimum parking requirements are prohibited for development projects located within:
-
-- **1/2 mile of public transportation hubs**, defined as:
-  - (i) A rail transit station
-  - (ii) A boat or ferry terminal served by either a bus connection stop or rail transit station
-  - (iii) An intersection of 2 or more bus routes with a **combined frequency** of service interval of 15 minutes or less during peak commute periods
-
-- **1/8 mile of public transportation corridors**, defined as:
-  - A street on which there is **one or more bus routes** with a **combined frequency** of bus service interval of 15 minutes or less during the morning and afternoon peak commute periods
-
-### Analysis Methodology
-
-This analysis implements the following methodology to identify qualifying transit hubs and corridors:
-
-**Peak Period Definition:**
-
-- Morning peak: 7:00 AM - 9:00 AM (120 minutes)
-- Afternoon peak: 4:00 PM - 6:00 PM (120 minutes)
-- Service is analyzed separately for each period; locations qualify if they meet frequency thresholds in **either** AM **or** PM
-
-**Stop Clustering (Bus Hubs Only):**
-
-- Bus stops within **150 feet** of each other are spatially clustered to represent physical intersections
-- This prevents overcounting stops at the same street corner and aligns with the statutory concept of "an intersection of 2 or more bus routes"
-- Clustering uses Illinois State Plane East projection (EPSG:3435) for accurate distance measurement
-
-**Route Overlap Verification (Bus Hubs Only):**
-
-- After clustering, we verify that routes actually overlap at the same physical intersection or street
-- Stop names (e.g., "Jackson & Lotus", "Oak Ave & Davis St") are parsed to extract street names
-- A cluster qualifies only if **2 or more routes share at least one common street name**
-- This ensures routes truly intersect at the location, not just have nearby stops within 150 feet
-- Example: Route A stops at "State & Madison", Route B stops at "State & Monroe" (both within 150ft) → they share "State" street → overlap verified
-
-**Combined Frequency Calculation:**
-
-- For each stop cluster (hubs) or individual stop (corridors), we count total trips across all routes during each peak period
-- Combined service interval = peak period duration (120 min) ÷ total trips
-- Example: 8 trips in 2 hours = 120 ÷ 8 = **15 minute average interval**
-
-**Qualification Criteria:**
-
-- **Bus Hubs**: Must have **2 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period AND **routes must overlap on same street/intersection**
-- **Bus Corridors**: Must have **1 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period
-- **Rail Hubs**: All CTA rail stations and Metra stations within Illinois automatically qualify
-
-**Direction Handling:**
-
-- If GTFS `direction_id` data is available, routes are analyzed by direction (northbound/southbound, eastbound/westbound)
-- This provides more accurate service frequency calculations at directional stops
-
-**Data Sources:**
-
-- CTA, Pace, and Metra GTFS (General Transit Feed Specification) data
-- TIGER/Line street network data from U.S. Census Bureau via tigris package
-- Analysis covers 6 Illinois counties: Cook, DuPage, Kane, Lake, McHenry, and Will
 
 ```{r packages}
 # Install packages if not already installed
@@ -1095,15 +1036,72 @@ map <- leaflet() %>%
     primaryAreaUnit = "sqmiles",
     activeColor = "#3D535D",
     completedColor = "#7D4479"
-  ) %>%
-  addMiniMap(
-    tiles = providers$CartoDB.Positron,
-    toggleDisplay = TRUE
   )
 
 # Display the map
 map
 ```
+
+This analysis examines the potential impact of new legislation passed in Illinois (SB2111) on Chicagoland.
+
+According to the updated bill [10400SB2111ham003](https://www.ilga.gov/documents/legislation/104/SB/PDF/10400SB2111ham003.pdf), minimum parking requirements are prohibited for development projects located within:
+
+- **1/2 mile of public transportation hubs**, defined as:
+  - (i) A rail transit station
+  - (ii) A boat or ferry terminal served by either a bus connection stop or rail transit station
+  - (iii) An intersection of 2 or more bus routes with a **combined frequency** of service interval of 15 minutes or less during peak commute periods
+
+- **1/8 mile of public transportation corridors**, defined as:
+  - A street on which there is **one or more bus routes** with a **combined frequency** of bus service interval of 15 minutes or less during the morning and afternoon peak commute periods
+
+### Analysis Methodology
+
+This analysis implements the following methodology to identify qualifying transit hubs and corridors:
+
+**Peak Period Definition:**
+
+- Morning peak: 7:00 AM - 9:00 AM (120 minutes)
+- Afternoon peak: 4:00 PM - 6:00 PM (120 minutes)
+- Service is analyzed separately for each period; locations qualify if they meet frequency thresholds in **either** AM **or** PM
+
+**Stop Clustering (Bus Hubs Only):**
+
+- Bus stops within **150 feet** of each other are spatially clustered to represent physical intersections
+- This prevents overcounting stops at the same street corner and aligns with the statutory concept of "an intersection of 2 or more bus routes"
+- Clustering uses Illinois State Plane East projection (EPSG:3435) for accurate distance measurement
+
+**Route Overlap Verification (Bus Hubs Only):**
+
+- After clustering, we verify that routes actually overlap at the same physical intersection or street
+- Stop names (e.g., "Jackson & Lotus", "Oak Ave & Davis St") are parsed to extract street names
+- A cluster qualifies only if **2 or more routes share at least one common street name**
+- This ensures routes truly intersect at the location, not just have nearby stops within 150 feet
+- Example: Route A stops at "State & Madison", Route B stops at "State & Monroe" (both within 150ft) → they share "State" street → overlap verified
+
+**Combined Frequency Calculation:**
+
+- For each stop cluster (hubs) or individual stop (corridors), we count total trips across all routes during each peak period
+- Combined service interval = peak period duration (120 min) ÷ total trips
+- Example: 8 trips in 2 hours = 120 ÷ 8 = **15 minute average interval**
+
+**Qualification Criteria:**
+
+- **Bus Hubs**: Must have **2 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period AND **routes must overlap on same street/intersection**
+- **Bus Corridors**: Must have **1 or more routes** AND **combined frequency ≤ 15 minutes** in at least one peak period
+- **Rail Hubs**: All CTA rail stations and Metra stations within Illinois automatically qualify
+
+**Direction Handling:**
+
+- If GTFS `direction_id` data is available, routes are analyzed by direction (northbound/southbound, eastbound/westbound)
+- This provides more accurate service frequency calculations at directional stops
+
+**Data Sources:**
+
+- CTA, Pace, and Metra GTFS (General Transit Feed Specification) data
+- TIGER/Line street network data from U.S. Census Bureau via tigris package
+- Analysis covers 6 Illinois counties: Cook, DuPage, Kane, Lake, McHenry, and Will
+
+
 
 ```{r summary_stats, include=FALSE}
 # Calculate all summary statistics and store in variables
