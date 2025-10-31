@@ -5,8 +5,7 @@ date: "October 30, 2025"
 output:
   html_document:
     theme: flatly
-    toc: true
-    toc_float: true
+    toc: false
     self_contained: true
     output_dir: "docs"
 ---
@@ -530,14 +529,22 @@ evening_peak_start <- as.ITime("16:00:00")
 evening_peak_end <- as.ITime("18:00:00")
 
 # Process stop times for peak hours
+# GTFS allows times > 24:00:00 for trips continuing past midnight
+# We need to filter these out to only get actual peak hours in Central Time
 all_stop_times[, arrival_time_hhmmss := substr(arrival_time, 1, 8)]
-all_stop_times[, arrival_time_obj := as.ITime(arrival_time_hhmmss, format="%H:%M:%S")]
 
-# Split into AM and PM separately
-am_stop_times <- all_stop_times[
+# Extract hour component to filter out times >= 24:00:00
+all_stop_times[, arrival_hour := as.integer(substr(arrival_time, 1, 2))]
+
+# Only process times < 24 hours (same-day service in Central Time)
+all_stop_times_same_day <- all_stop_times[arrival_hour < 24]
+all_stop_times_same_day[, arrival_time_obj := as.ITime(arrival_time_hhmmss, format="%H:%M:%S")]
+
+# Split into AM and PM separately (now guaranteed to be Central Time same-day)
+am_stop_times <- all_stop_times_same_day[
   arrival_time_obj >= morning_peak_start & arrival_time_obj <= morning_peak_end
 ]
-pm_stop_times <- all_stop_times[
+pm_stop_times <- all_stop_times_same_day[
   arrival_time_obj >= evening_peak_start & arrival_time_obj <= evening_peak_end
 ]
 
@@ -719,11 +726,106 @@ if (has_direction) {
   )
 }
 
+# Calculate first and last departure times for each qualifying cluster
+# Times are in Central Time (GTFS local time for Chicago area)
+# Helper function to convert ITime to 12-hour format string
+format_itime <- function(itime_obj) {
+  # ITime stores seconds since midnight
+  # Convert to hours and minutes
+  hours <- itime_obj %/% 3600
+  minutes <- (itime_obj %% 3600) %/% 60
+
+  # Convert to 12-hour format
+  period <- ifelse(hours < 12, "AM", "PM")
+  display_hours <- ifelse(hours == 0, 12, ifelse(hours > 12, hours - 12, hours))
+
+  sprintf("%02d:%02d %s", display_hours, minutes, period)
+}
+
+# AM peak departure times (7-9 AM Central)
+am_cluster_times <- am_peak_bus_stops[cluster_id %in% qualifying_clusters$cluster_id, .(
+  first_departure_am = format_itime(min(arrival_time_obj)),
+  last_departure_am = format_itime(max(arrival_time_obj))
+), by = cluster_id]
+
+# PM peak departure times (4-6 PM Central)
+pm_cluster_times <- pm_peak_bus_stops[cluster_id %in% qualifying_clusters$cluster_id, .(
+  first_departure_pm = format_itime(min(arrival_time_obj)),
+  last_departure_pm = format_itime(max(arrival_time_obj))
+), by = cluster_id]
+
+# Calculate route lists and directions for each cluster
+# Get unique routes serving each cluster
+cluster_routes <- all_peak_bus_stops[cluster_id %in% qualifying_clusters$cluster_id, {
+  # Get unique route IDs
+  route_ids <- unique(unique_route_id)
+
+  # Extract route short names by merging with all_routes
+  route_info <- all_routes[unique_route_id %in% route_ids,
+                           .(unique_route_id, route_short_name, route_long_name)]
+
+  # Create route display names (use short name if available, else use long name)
+  route_names <- if (nrow(route_info) > 0) {
+    sapply(route_info$unique_route_id, function(rid) {
+      r <- route_info[unique_route_id == rid]
+      if (!is.na(r$route_short_name) && r$route_short_name != "") {
+        r$route_short_name
+      } else if (!is.na(r$route_long_name)) {
+        r$route_long_name
+      } else {
+        gsub("^[^_]+_", "", rid)  # Extract route ID from unique_route_id
+      }
+    })
+  } else {
+    sapply(route_ids, function(rid) gsub("^[^_]+_", "", rid))
+  }
+
+  routes_list <- paste(sort(unique(route_names)), collapse = ", ")
+
+  # Get directions if available
+  if ("direction_id" %in% names(.SD) && sum(!is.na(direction_id)) > 0) {
+    directions <- unique(direction_id[!is.na(direction_id)])
+    direction_labels <- sapply(directions, function(d) {
+      if (d == 0) "Outbound" else if (d == 1) "Inbound" else as.character(d)
+    })
+    directions_list <- paste(sort(direction_labels), collapse = ", ")
+  } else {
+    directions_list <- "N/A"
+  }
+
+  list(routes = routes_list, directions = directions_list)
+}, by = cluster_id]
+
+# Merge departure times with qualifying_stop_ids
+qualifying_stop_ids <- merge(
+  qualifying_stop_ids,
+  am_cluster_times,
+  by = "cluster_id",
+  all.x = TRUE
+)
+
+qualifying_stop_ids <- merge(
+  qualifying_stop_ids,
+  pm_cluster_times,
+  by = "cluster_id",
+  all.x = TRUE
+)
+
+qualifying_stop_ids <- merge(
+  qualifying_stop_ids,
+  cluster_routes,
+  by = "cluster_id",
+  all.x = TRUE
+)
+
 qualifying_bus_hubs <- qualifying_stop_ids[, .(
   unique_stop_id, stop_id, stop_name, stop_lat, stop_lon, agency,
   cluster_id, num_routes_am, num_routes_pm, num_routes_total,
   trips_am, trips_pm, trips_total,
-  interval_am, interval_pm, interval_combined
+  interval_am, interval_pm, interval_combined,
+  first_departure_am, last_departure_am,
+  first_departure_pm, last_departure_pm,
+  routes, directions
 )]
 qualifying_bus_hubs[, type := "bus_hub"]
 
@@ -982,12 +1084,24 @@ map <- leaflet() %>%
       if_else(type == "bus_hub" & !is.na(num_routes_total),
         paste0(
           "<hr>",
+          "<strong>Cluster ID: ", cluster_id, "</strong><br>",
+          "<hr>",
+          "<strong>Routes:</strong> ", if_else(!is.na(routes), routes, "N/A"), "<br>",
+          "<strong>Directions:</strong> ", if_else(!is.na(directions), directions, "N/A"), "<br>",
+          "<hr>",
           "<strong>Service Frequency:</strong><br>",
           "Routes (AM/PM/Total): ", num_routes_am, "/", num_routes_pm, "/", num_routes_total, "<br>",
           "Trips (AM/PM/Total): ", trips_am, "/", trips_pm, "/", trips_total, "<br>",
           "Avg Interval (AM/PM): ", round(interval_am, 1), "/", round(interval_pm, 1), " min<br>",
           "Combined Interval: ", round(interval_combined, 1), " min<br>",
-          "Cluster ID: ", cluster_id
+          "<hr>",
+          "<strong>AM Peak Service (7-9 AM Central):</strong><br>",
+          "First Departure: ", if_else(!is.na(first_departure_am), first_departure_am, "N/A"), "<br>",
+          "Last Departure: ", if_else(!is.na(last_departure_am), last_departure_am, "N/A"), "<br>",
+          "<hr>",
+          "<strong>PM Peak Service (4-6 PM Central):</strong><br>",
+          "First Departure: ", if_else(!is.na(first_departure_pm), first_departure_pm, "N/A"), "<br>",
+          "Last Departure: ", if_else(!is.na(last_departure_pm), last_departure_pm, "N/A")
         ),
         ""
       )
