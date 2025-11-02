@@ -12,13 +12,6 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-Sys.setenv(
-  OMP_NUM_THREADS = "1",
-  OMP_THREAD_LIMIT = "1",
-  OPENBLAS_NUM_THREADS = "1",
-  MKL_NUM_THREADS = "1",
-  NUMEXPR_NUM_THREADS = "1"
-)
 ```
 
 ### What Are Parking Mandates?
@@ -44,8 +37,11 @@ Parking mandates, also known as parking minimums, are zoning regulations that re
 ### Enter: The People Over Parking Act
 
 ```{r packages}
+# Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
 # Install packages if not already installed
-required_packages <- c("tidyverse", "sf", "leaflet", "leaflet.extras", 
+required_packages <- c("tidyverse", "sf", "leaflet", "leaflet.extras",
                        "data.table", "zip", "httr", "lubridate", "mapview", "tigris")
 
 new_packages <- required_packages[!required_packages %in% installed.packages()[,"Package"]]
@@ -61,12 +57,15 @@ library(zip)
 library(httr)
 library(lubridate)
 library(mapview)
-library(tigris) # Added for street network data
-
-options(tigris_use_cache = TRUE)
+library(tigris) # Added for street network data and state boundaries
 
 # Disable s2 processing to avoid geometry validation issues
 sf_use_s2(FALSE)
+
+# Load Illinois state boundary for clipping transit areas
+illinois_boundary <- states(cb = TRUE, year = 2023) %>%
+  filter(STUSPS == "IL") %>%
+  st_transform(4326)  # Transform to WGS84
 ```
 
 ```{r load_existing_data}
@@ -89,38 +88,32 @@ download_and_extract_gtfs <- function(agency_name, zip_link) {
     dir.create(cache_dir)
   }
   cache_file <- file.path(cache_dir, paste0(agency_name, "_gtfs.zip"))
-  force_download <- identical(Sys.getenv("FORCE_GTFS_DOWNLOAD"), "1")
   
-  if (file.exists(cache_file) && !force_download) {
-    message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
-    file.copy(cache_file, temp_file, overwrite = TRUE)
-  } else {
-    tryCatch({
-      options(timeout = 60)
-      
-      response <- httr::GET(
-        zip_link,
-        httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-        httr::write_disk(temp_file, overwrite = TRUE),
-        httr::timeout(60)
-      )
-      
-      if (httr::status_code(response) != 200) {
-        stop(paste0("Failed to download with status code: ", httr::status_code(response)))
-      }
-      
-      file.copy(temp_file, cache_file, overwrite = TRUE)
-      
-    }, error = function(e) {
-      message(paste0("Download failed for ", agency_name, ": ", e$message))
-      if (file.exists(cache_file)) {
-        message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
-        file.copy(cache_file, temp_file, overwrite = TRUE)
-      } else {
-        stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
-      }
-    })
-  }
+  tryCatch({
+    options(timeout = 60)
+    
+    response <- httr::GET(
+      zip_link,
+      httr::user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+      httr::write_disk(temp_file, overwrite = TRUE),
+      httr::timeout(60)
+    )
+    
+    if (httr::status_code(response) != 200) {
+      stop(paste0("Failed to download with status code: ", httr::status_code(response)))
+    }
+    
+    file.copy(temp_file, cache_file, overwrite = TRUE)
+    
+  }, error = function(e) {
+    message(paste0("Download failed for ", agency_name, ": ", e$message))
+    if (file.exists(cache_file)) {
+      message(paste0("Using cached GTFS data for ", agency_name, " from ", cache_file))
+      file.copy(cache_file, temp_file, overwrite = TRUE)
+    } else {
+      stop(paste0("Could not download GTFS data for ", agency_name, " and no cache available."), call. = FALSE)
+    }
+  })
   
   gtfs_files <- unzip(temp_file, exdir = temp_dir)
   return(temp_dir)
@@ -296,41 +289,19 @@ convert_integer64 <- function(dt) {
   return(dt)
 }
 
-# Apply conversion to all datasets and preserve modifications
-gtfs_datasets <- list(
-  cta = cta_data,
-  pace = pace_data,
-  metra = metra_data,
-  metro_stl = metro_stl_data,
-  cumtd = cumtd_data
-)
-
-gtfs_datasets <- lapply(gtfs_datasets, function(data) {
+# Apply conversion to all datasets
+for (data in list(cta_data, pace_data, metra_data, metro_stl_data, cumtd_data)) {
   data$stops <- convert_integer64(data$stops)
   data$routes <- convert_integer64(data$routes)
   data$trips <- convert_integer64(data$trips)
   data$stop_times <- convert_integer64(data$stop_times)
-  if ("stop_sequence" %in% names(data$stop_times)) {
-    data$stop_times[, stop_sequence := as.integer(stop_sequence)]
-  }
   data$calendar <- convert_integer64(data$calendar)
-  data
-})
-
-cta_data <- gtfs_datasets$cta
-pace_data <- gtfs_datasets$pace
-metra_data <- gtfs_datasets$metra
-metro_stl_data <- gtfs_datasets$metro_stl
-cumtd_data <- gtfs_datasets$cumtd
+}
 
 all_stops <- rbindlist(list(cta_data$stops, pace_data$stops, metra_data$stops, metro_stl_data$stops, cumtd_data$stops), fill = TRUE, use.names = TRUE)
 all_routes <- rbindlist(list(cta_data$routes, pace_data$routes, metra_data$routes, metro_stl_data$routes, cumtd_data$routes), fill = TRUE, use.names = TRUE)
 all_trips <- rbindlist(list(cta_data$trips, pace_data$trips, metra_data$trips, metro_stl_data$trips, cumtd_data$trips), fill = TRUE, use.names = TRUE)
 all_stop_times <- rbindlist(list(cta_data$stop_times, pace_data$stop_times, metra_data$stop_times, metro_stl_data$stop_times, cumtd_data$stop_times), fill = TRUE, use.names = TRUE)
-
-if ("stop_sequence" %in% names(all_stop_times)) {
-  all_stop_times[, stop_sequence := as.integer(stop_sequence)]
-}
 
 # For calendar, ensure consistent column order and types before combining
 standard_calendar_cols <- c("service_id", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "start_date", "end_date", "agency")
@@ -361,52 +332,6 @@ for (data in list(cta_data, pace_data, metra_data, metro_stl_data, cumtd_data)) 
 }
 
 all_calendar <- rbindlist(list(cta_data$calendar, pace_data$calendar, metra_data$calendar, metro_stl_data$calendar, cumtd_data$calendar), fill = TRUE, use.names = TRUE)
-
-# Load Illinois boundary and helper clipping utilities
-illinois_boundary <- states(cb = TRUE, year = 2023) %>%
-  dplyr::filter(STUSPS == "IL") %>%
-  st_transform(4326)
-illinois_boundary_geom <- st_geometry(illinois_boundary)
-
-clip_sfc_to_il <- function(geom) {
-  if (is.null(geom) || length(geom) == 0) {
-    return(geom)
-  }
-  if (all(st_is_empty(geom))) {
-    return(geom)
-  }
-  st_intersection(geom, illinois_boundary_geom)
-}
-
-clip_sf_to_il <- function(sf_obj) {
-  if (is.null(sf_obj) || nrow(sf_obj) == 0) {
-    return(sf_obj)
-  }
-  clipped_geom <- clip_sfc_to_il(st_geometry(sf_obj))
-  st_geometry(sf_obj) <- clipped_geom
-  sf_obj <- sf_obj[!st_is_empty(sf_obj), ]
-  sf_obj
-}
-
-# Restrict analysis to stops within Illinois
-all_stops_sf <- st_as_sf(all_stops, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
-within_il <- lengths(st_within(all_stops_sf, illinois_boundary_geom)) > 0
-all_stops_sf <- all_stops_sf[within_il, ]
-all_stops <- as.data.table(st_drop_geometry(all_stops_sf))
-
-illinois_stop_ids <- unique(all_stops$unique_stop_id)
-all_stop_times <- all_stop_times[unique_stop_id %in% illinois_stop_ids]
-
-illinois_trip_ids <- unique(all_stop_times$unique_trip_id)
-all_trips <- all_trips[unique_trip_id %in% illinois_trip_ids]
-
-illinois_route_ids <- unique(all_trips$unique_route_id)
-all_routes <- all_routes[unique_route_id %in% illinois_route_ids]
-
-illinois_service_ids <- unique(all_trips$service_id)
-if ("service_id" %in% names(all_calendar)) {
-  all_calendar <- all_calendar[service_id %in% illinois_service_ids]
-}
 
 # Clean up stop times that are > 24:00:00
 all_stop_times[, arrival_time := fifelse(substr(arrival_time, 1, 2) >= "24", 
@@ -1122,15 +1047,13 @@ all_hub_areas <- st_union(half_mile_buffers)
 
 # --- Combine Areas and Transform back to WGS84 ---
 
-# Corridors
-all_corridors_union_wgs84 <- st_transform(all_corridors_union, 4326)
-all_corridors_union_wgs84 <- clip_sfc_to_il(all_corridors_union_wgs84)
+# Corridors - transform and clip to Illinois boundary
+all_corridors_union_wgs84_raw <- st_transform(all_corridors_union, 4326)
+all_corridors_union_wgs84 <- st_intersection(all_corridors_union_wgs84_raw, illinois_boundary)
 
 # Hubs
 all_hub_areas_wgs84 <- st_transform(all_hub_areas, 4326)
-all_hub_areas_wgs84 <- clip_sfc_to_il(all_hub_areas_wgs84)
 half_mile_buffers_wgs84 <- st_transform(half_mile_buffers, 4326)
-half_mile_buffers_wgs84 <- clip_sf_to_il(half_mile_buffers_wgs84)
 
 # Separate hub buffers by agency
 cta_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "cta", ]
@@ -1139,17 +1062,12 @@ metra_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "
 metro_stl_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "metro_stl", ]
 cumtd_hub_buffers <- half_mile_buffers_wgs84[half_mile_buffers_wgs84$agency == "cumtd", ]
 
-# Union hub buffers by agency
-cta_hubs_union <- if(nrow(cta_hub_buffers) > 0) st_union(cta_hub_buffers) else st_sfc(crs = 4326)
-pace_hubs_union <- if(nrow(pace_hub_buffers) > 0) st_union(pace_hub_buffers) else st_sfc(crs = 4326)
-metra_hubs_union <- if(nrow(metra_hub_buffers) > 0) st_union(metra_hub_buffers) else st_sfc(crs = 4326)
-metro_stl_hubs_union <- if(nrow(metro_stl_hub_buffers) > 0) st_union(metro_stl_hub_buffers) else st_sfc(crs = 4326)
-cumtd_hubs_union <- if(nrow(cumtd_hub_buffers) > 0) st_union(cumtd_hub_buffers) else st_sfc(crs = 4326)
-cta_hubs_union <- clip_sfc_to_il(cta_hubs_union)
-pace_hubs_union <- clip_sfc_to_il(pace_hubs_union)
-metra_hubs_union <- clip_sfc_to_il(metra_hubs_union)
-metro_stl_hubs_union <- clip_sfc_to_il(metro_stl_hubs_union)
-cumtd_hubs_union <- clip_sfc_to_il(cumtd_hubs_union)
+# Union hub buffers by agency and clip to Illinois boundary
+cta_hubs_union <- if(nrow(cta_hub_buffers) > 0) st_intersection(st_union(cta_hub_buffers), illinois_boundary) else st_sfc(crs = 4326)
+pace_hubs_union <- if(nrow(pace_hub_buffers) > 0) st_intersection(st_union(pace_hub_buffers), illinois_boundary) else st_sfc(crs = 4326)
+metra_hubs_union <- if(nrow(metra_hub_buffers) > 0) st_intersection(st_union(metra_hub_buffers), illinois_boundary) else st_sfc(crs = 4326)
+metro_stl_hubs_union <- if(nrow(metro_stl_hub_buffers) > 0) st_intersection(st_union(metro_stl_hub_buffers), illinois_boundary) else st_sfc(crs = 4326)
+cumtd_hubs_union <- if(nrow(cumtd_hub_buffers) > 0) st_intersection(st_union(cumtd_hub_buffers), illinois_boundary) else st_sfc(crs = 4326)
 
 # Separate corridor buffers by agency (approximate)
 # This is more complex, as a street can be served by multiple agencies.
@@ -1158,8 +1076,10 @@ cumtd_hubs_union <- clip_sfc_to_il(cumtd_hubs_union)
 # We will create an 'all_corridors_union_wgs84' object for the map.
 
 # Combine all affected areas (hubs + corridors)
-all_affected_areas_combined <- st_union(c(all_hub_areas_wgs84, all_corridors_union_wgs84))
-all_affected_areas_combined <- clip_sfc_to_il(all_affected_areas_combined)
+all_affected_areas_combined_raw <- st_union(c(all_hub_areas_wgs84, all_corridors_union_wgs84))
+
+# Clip to Illinois boundary to exclude Missouri areas
+all_affected_areas_combined <- st_intersection(all_affected_areas_combined_raw, illinois_boundary)
 ```
 
 ```{r calculate_areas}
@@ -1203,12 +1123,10 @@ agency_pal <- colorFactor(
   domain = all_hubs_sf$agency_name
 )
 
-il_bbox <- st_bbox(illinois_boundary)
-
 # Create the interactive map
 map <- leaflet() %>%
+  setView(lng = -87.6079, lat = 41.8917, zoom = 9) %>%
   addProviderTiles(providers$CartoDB.Positron) %>%
-  fitBounds(il_bbox["xmin"], il_bbox["ymin"], il_bbox["xmax"], il_bbox["ymax"]) %>%
   
   # Combined affected areas (default visible)
   addPolygons(
@@ -1428,10 +1346,19 @@ This analysis implements the following methodology to identify qualifying transi
 - If GTFS `direction_id` data is available, routes are analyzed by direction (northbound/southbound, eastbound/westbound)
 - This provides more accurate service frequency calculations at directional stops
 
+**Geographic Boundaries and Clipping:**
+
+- All transit hub and corridor buffers are clipped to Illinois state boundaries
+- This ensures parking mandate relief applies only to areas within Illinois jurisdiction
+- Metro St. Louis transit system operates across the Illinois-Missouri border; only Illinois portions of hub/corridor buffers are included in the analysis
+- Metra serves some stations in Wisconsin (Kenosha County); these are excluded from the analysis (latitude filter at 42.5°)
+- Clipping is performed after buffer creation using the U.S. Census TIGER/Line state boundary for Illinois
+
 **Data Sources:**
 
 - Chicago area: CTA, Pace, and Metra GTFS (General Transit Feed Specification) data
-- St. Louis area: Metro St. Louis GTFS data (includes MetroLink and MetroBus)
+- St. Louis area: Metro St. Louis GTFS data (includes MetroLink light rail and MetroBus)
+  - Note: Metro St. Louis operates in both Missouri and Illinois; only Illinois portions are included after geographic clipping
 - Champaign-Urbana: CUMTD (Champaign-Urbana Mass Transit District) GTFS data
 - TIGER/Line street network data from U.S. Census Bureau via tigris package
 - Analysis covers 10 Illinois counties:
@@ -1557,6 +1484,8 @@ rail_hub_counts <- table(rail_stops$agency)
   - Champaign-Urbana (1 county): `r sprintf("%.1f", champaign_area_sqmi)` sq mi
   - **Total: `r sprintf("%.1f", total_il_area_sqmi)` sq mi**
 
+**Note**: Area calculations reflect only portions within Illinois state boundaries. Cross-border transit services (Metro St. Louis in Missouri, Metra in Wisconsin) are excluded through geographic clipping.
+
 ## Notes on Updated Methodology
 
 This analysis implements the following improvements to align with SB 2111's statutory language:
@@ -1572,3 +1501,5 @@ This analysis implements the following improvements to align with SB 2111's stat
    - **Bus Corridors**: Must have **1+ routes** AND **combined frequency ≤15 minutes** in at least one peak period
 
 5. **Transparent Metrics**: Each hub and corridor stop now includes diagnostic information showing AM/PM service levels, making it easy to verify which locations qualify and why.
+
+6. **Illinois Boundary Clipping**: All hub and corridor buffer areas are clipped to Illinois state boundaries after calculation. This is critical for cross-border transit agencies (Metro St. Louis, Metra) to ensure parking mandate relief applies only within Illinois jurisdiction. Area calculations reflect only the Illinois portions of buffer zones.
